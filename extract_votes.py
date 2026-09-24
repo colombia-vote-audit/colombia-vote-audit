@@ -30,8 +30,10 @@ import pymupdf
 
 API_BASE = os.environ.get("LLM_BASE_URL", "https://gateway.mircloud.trytokenfactory.dev/v1")
 MODEL = os.environ.get("LLM_MODEL", "deepseek-v4.1-flash-uncensored-fp8")
-# "anthropic" -> /messages (Claude models), "openai" -> /chat/completions (most others)
-API_STYLE = os.environ.get("LLM_API_STYLE", "anthropic" if MODEL.startswith("claude") else "openai")
+# "anthropic" -> /messages (Claude models), "responses" -> /responses (GPT models on
+# OpenCode), "openai" -> /chat/completions (most others)
+API_STYLE = os.environ.get("LLM_API_STYLE", "anthropic" if MODEL.startswith("claude")
+                           else "responses" if MODEL.startswith("gpt-") else "openai")
 # Some gateways (e.g. OpenCode's) sit behind Cloudflare, which rejects urllib's default User-Agent.
 USER_AGENT = "colombia-vote-audit/0.1"
 
@@ -40,6 +42,12 @@ USER_AGENT = "colombia-vote-audit/0.1"
 PAGES_PER_CHUNK = 5
 PAGE_OVERLAP = 1
 MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "65536"))
+# Sampling temperature; unset uses the provider's default. Some reasoning models
+# (e.g. GPT-6 Luna) reject it.
+TEMPERATURE = float(os.environ["LLM_TEMPERATURE"]) if os.environ.get("LLM_TEMPERATURE") else None
+# Reasoning effort ("none", "low", "medium", "high"...); unset uses the provider's
+# default. Accepted values differ by model. Not sent for the anthropic style.
+REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT") or None
 REQUEST_TIMEOUT = 600  # seconds; a chunk with long roll calls can take minutes
 WORKERS = 8
 MAX_ATTEMPTS = 6
@@ -222,12 +230,25 @@ def call_llm(system, user):
         payload = {"model": MODEL, "max_tokens": MAX_OUTPUT_TOKENS, "system": system,
                    "messages": [{"role": "user", "content": user}]}
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif API_STYLE == "responses":
+        url = f"{API_BASE}/responses"
+        # The Responses API wants "json" in the input itself, not just the instructions.
+        payload = {"model": MODEL, "instructions": system,
+                   "input": user + "\n\nReply with the json object described in the instructions.",
+                   "max_output_tokens": MAX_OUTPUT_TOKENS, "text": {"format": {"type": "json_object"}}}
+        if REASONING_EFFORT:
+            payload["reasoning"] = {"effort": REASONING_EFFORT}
+        headers = {}
     else:
         url = f"{API_BASE}/chat/completions"
         payload = {"model": MODEL, "response_format": {"type": "json_object"},
                    "max_tokens": MAX_OUTPUT_TOKENS,
                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if REASONING_EFFORT:
+            payload["reasoning_effort"] = REASONING_EFFORT
         headers = {}
+    if TEMPERATURE is not None:
+        payload["temperature"] = TEMPERATURE
     headers |= {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                 "User-Agent": USER_AGENT}
     req = urllib.request.Request(url, json.dumps(payload).encode(), headers)
@@ -237,6 +258,11 @@ def call_llm(system, user):
                 data = json.load(r)
             if API_STYLE == "anthropic":
                 text, stop = data["content"][0]["text"], data.get("stop_reason")
+            elif API_STYLE == "responses":
+                text = "".join(c.get("text", "") for o in data.get("output", [])
+                               if o.get("type") == "message" for c in o.get("content", []))
+                stop = (data.get("incomplete_details") or {}).get("reason")
+                stop = "length" if stop == "max_output_tokens" else stop
             else:
                 choice = data["choices"][0]
                 text, stop = choice["message"]["content"], choice.get("finish_reason")
@@ -246,11 +272,14 @@ def call_llm(system, user):
         except OutputTruncated:
             raise
         except Exception as e:
-            # OpenCode reports an exhausted account budget as a 429.
-            if isinstance(e, urllib.error.HTTPError) and e.code == 429:
+            if isinstance(e, urllib.error.HTTPError):
                 body = e.read().decode(errors="replace")
-                if "budget" in body.lower():
+                # OpenCode reports an exhausted account budget as a 429.
+                if e.code == 429 and "budget" in body.lower():
                     raise BudgetExceeded(body) from e
+                # Other client errors won't succeed on retry.
+                if 400 <= e.code < 500 and e.code not in (408, 429):
+                    raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from e
             if attempt == MAX_ATTEMPTS - 1:
                 raise
             delay = retry_delay(e, attempt)
