@@ -3,16 +3,25 @@
 
 Usage:
     export LLM_API_KEY=...
-    python3 extract_votes.py gaceta_103.pdf gaceta_429.pdf [--db votes.db]
+    python3 extract_votes.py gaceta_103.pdf gaceta_429.pdf [--db votes.db] [--legislators data/cva.db]
 
 The database has one row per PDF in `documents`, one per vote in `votes` and
 one per (vote, legislator) in `vote_records`; see SCHEMA below. Each PDF's
 results are saved as soon as its chunks finish, and re-running a PDF replaces
 its earlier results.
 
+House plenary sessions vote electronically, and their full roll calls are only
+in scanned voting records printed as images. Those pages are read from the
+image (LLM_VISION_MODEL, default LLM_MODEL), and each result is checked against
+the record's printed totals and the result announced in the text; votes that
+don't add up are stored with verified = 0 and the reason. With --legislators
+(the pipeline database), the model picks each name from the members of
+Congress at the time instead of spelling it from the scan.
+
 Only dependency: PyMuPDF (pip install pymupdf). LLM calls go to an OpenAI-compatible gateway (LLM_BASE_URL).
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -33,7 +42,7 @@ MODEL = os.environ.get("LLM_MODEL", "deepseek-v4.1-flash-uncensored-fp8")
 # "anthropic" -> /messages (Claude models), "responses" -> /responses (GPT models on
 # OpenCode), "openai" -> /chat/completions (most others)
 API_STYLE = os.environ.get("LLM_API_STYLE", "anthropic" if MODEL.startswith("claude")
-                           else "responses" if MODEL.startswith("gpt-") else "openai")
+                           else "responses" if MODEL.startswith("gpt-") else "openai")  # see api_style()
 # Some gateways (e.g. OpenCode's) sit behind Cloudflare, which rejects urllib's default User-Agent.
 USER_AGENT = "colombia-vote-audit/0.1"
 
@@ -50,6 +59,15 @@ TEMPERATURE = float(os.environ["LLM_TEMPERATURE"]) if os.environ.get("LLM_TEMPER
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT") or None
 REQUEST_TIMEOUT = 600  # seconds; a chunk with long roll calls can take minutes
 WORKERS = int(os.environ.get("LLM_WORKERS", "8"))  # parallel calls
+# House plenary sessions vote electronically: the text names only members who
+# voted by hand, and everyone else is in a scanned voting record printed as an
+# image ("PUBLICACIÓN REGISTRO DE VOTACIÓN"), next to a scanned "REGISTRO
+# MANUAL". Their text layer is garbled or missing, so those pages are read from
+# the image by a model that accepts images.
+VISION_MODEL = os.environ.get("LLM_VISION_MODEL", MODEL)
+RECORD_DPI = 200
+RECORD_RETRY_DPI = 250  # a page is read again at this resolution if a row number is skipped
+RECORD_IMAGE_PIXELS = 500_000  # smaller images are logos, signatures and seals
 MAX_ATTEMPTS = 6
 
 # Only windows with signs that a roll call took place go to the model: an announced
@@ -140,6 +158,20 @@ JSON output:
 """
 
 
+RECORD_PROMPT = """This page image is from Colombia's Gaceta del Congreso. It may contain voting records: electronic records ("PUBLICACIÓN REGISTRO DE VOTACIÓN": a numbered list of members with Sí or No, and a small totals box) and manual records ("REGISTRO MANUAL": a table with SI and NO columns marked with X and a TOTAL row). Attendance lists, agendas and other scanned pages are not voting records.
+
+MEMBERS lists the members of Congress around the date of the vote. For every row, give the name exactly as printed and the member it refers to, copied exactly from MEMBERS, or null if none fits. Printed names are surnames first and may be abbreviated or misspelled.
+
+Return only a json object: {"records": [...]}, or {"records": []} if the page has no voting record. Each record is:
+{"kind": "electronic" | "manual",
+ "title": "the vote's title as printed, or ''",
+ "date": "DD/MM/YYYY as printed, or ''",
+ "totals": {"si": int, "no": int},   // exactly as printed in the record's totals box or TOTAL row
+ "rows": [{"n": int | null, "printed": "...", "member": "..." | null, "vote": "si" | "no"}]}
+"n" is the row number as printed (electronic records number every row). Include every row of every record on the page, in order.
+A record's rows can continue from the previous page without its title or totals: return those rows as a record with kind "electronic", title "" and totals {"si": 0, "no": 0}."""
+
+
 # ---------- PDF -> text ----------
 
 def page_text(page):
@@ -225,6 +257,51 @@ def build_chunks(pages):
     return chunks
 
 
+# House plenary results mention the electronic and manual votes they add up
+# ("83 votos electrónicos", "han votado manualmente"). Other chambers print the
+# names in the text, and their scanned images are proposals and letters.
+ELECTRONIC_VOTE = re.compile(r"votos?\s+(?:electr[oó]nicos?|digitales?)|votado\s+manualmente|votos?\s+manuales", re.I)
+
+
+def record_pages(path, pages):
+    """1-based pages that may hold a scanned voting record: a large image within
+    two pages of a result that counts electronic or manual votes, and a
+    large-image page right after one of those, since records run onto the next
+    page."""
+    doc = pymupdf.open(path)
+    big = {i + 1 for i, p in enumerate(doc) if any(im[2] * im[3] >= RECORD_IMAGE_PIXELS for im in p.get_images())}
+    electronic = [i + 1 for i, t in enumerate(pages) if ELECTRONIC_VOTE.search(t)]
+    found = {p for p in big if any(abs(p - r) <= 2 for r in electronic)}
+    return sorted(found | {p + 1 for p in found if p + 1 in big})
+
+
+MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+          "septiembre", "octubre", "noviembre", "diciembre"]
+RECORD_DATE = re.compile(r"Inicio\W{0,3}de\s+la\s+votaci[oó]n\W{0,3}(\d{2})/(\d{2})/(\d{4})", re.I)
+
+
+def spanish_date(text):
+    """'8 de abril de 2026' -> '2026-04-08', or None."""
+    m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", text or "", re.I)
+    if m and m.group(2).lower() in MONTHS:
+        return f"{m.group(3)}-{MONTHS.index(m.group(2).lower()) + 1:02d}-{int(m.group(1)):02d}"
+    return None
+
+
+def members_on(legislators, day):
+    """Everyone who held a seat in the year up to `day`, one per line, for the
+    record prompt. `legislators` is the pipeline database with its legislators
+    tables, or None."""
+    if legislators is None or day is None:
+        return ""
+    year_before = f"{int(day[:4]) - 1}{day[4:]}"
+    rows = legislators.execute(
+        """SELECT DISTINCT l.name, t.chamber FROM legislators l
+           JOIN legislator_terms t ON t.legislator_id = l.id
+           WHERE t.start_date <= ? AND t.end_date >= ? ORDER BY l.name""", (day, year_before)).fetchall()
+    return "\n".join(f"{name} ({chamber})" for name, chamber in rows)
+
+
 # ---------- LLM ----------
 
 class OutputTruncated(Exception):
@@ -243,27 +320,45 @@ def retry_delay(error, attempt):
     return min(5 * 2**attempt, 120)
 
 
-def call_llm(system, user):
+def api_style(model):
+    if os.environ.get("LLM_API_STYLE"):
+        return os.environ["LLM_API_STYLE"]
+    return "anthropic" if model.startswith("claude") else "responses" if model.startswith("gpt-") else "openai"
+
+
+def call_llm(system, user, image_png=None, model=MODEL):
+    """Send one request and return the parsed json. `image_png` (bytes) is
+    attached to the user message for models that read images."""
     key = os.environ["LLM_API_KEY"]
-    if API_STYLE == "anthropic":
+    style = api_style(model)
+    image = base64.b64encode(image_png).decode() if image_png else None
+    if style == "anthropic":
         url = f"{API_BASE}/messages"
-        payload = {"model": MODEL, "max_tokens": MAX_OUTPUT_TOKENS, "system": system,
-                   "messages": [{"role": "user", "content": user}]}
+        content = [{"type": "text", "text": user}]
+        if image:
+            content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image}})
+        payload = {"model": model, "max_tokens": MAX_OUTPUT_TOKENS, "system": system,
+                   "messages": [{"role": "user", "content": content}]}
         headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-    elif API_STYLE == "responses":
+    elif style == "responses":
         url = f"{API_BASE}/responses"
         # The Responses API wants "json" in the input itself, not just the instructions.
-        payload = {"model": MODEL, "instructions": system,
-                   "input": user + "\n\nReply with the json object described in the instructions.",
+        content = [{"type": "input_text", "text": user + "\n\nReply with the json object described in the instructions."}]
+        if image:
+            content.append({"type": "input_image", "image_url": f"data:image/png;base64,{image}"})
+        payload = {"model": model, "instructions": system, "input": [{"role": "user", "content": content}],
                    "max_output_tokens": MAX_OUTPUT_TOKENS, "text": {"format": {"type": "json_object"}}}
         if REASONING_EFFORT:
             payload["reasoning"] = {"effort": REASONING_EFFORT}
         headers = {}
     else:
         url = f"{API_BASE}/chat/completions"
-        payload = {"model": MODEL, "response_format": {"type": "json_object"},
+        content = [{"type": "text", "text": user}]
+        if image:
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}})
+        payload = {"model": model, "response_format": {"type": "json_object"},
                    "max_tokens": MAX_OUTPUT_TOKENS,
-                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]}
         if REASONING_EFFORT:
             payload["reasoning_effort"] = REASONING_EFFORT
         headers = {}
@@ -276,9 +371,9 @@ def call_llm(system, user):
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
                 data = json.load(r)
-            if API_STYLE == "anthropic":
+            if style == "anthropic":
                 text, stop = data["content"][0]["text"], data.get("stop_reason")
-            elif API_STYLE == "responses":
+            elif style == "responses":
                 text = "".join(c.get("text", "") for o in data.get("output", [])
                                if o.get("type") == "message" for c in o.get("content", []))
                 stop = (data.get("incomplete_details") or {}).get("reason")
@@ -328,6 +423,214 @@ def extract_chunk(meta, chunk):
         return [], str(e)
 
 
+def skipped_rows(records):
+    """Row numbers missing from the electronic records on a page."""
+    missing = 0
+    for r in records:
+        if r.get("kind") != "electronic":
+            continue
+        seen = {row["n"] for row in r.get("rows", []) if isinstance(row.get("n"), int)}
+        if seen:
+            missing += len(set(range(min(seen), max(seen) + 1)) - seen)
+    return missing
+
+
+def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_RETRY_DPI)):
+    """Voting records the model read from one page image, and the error if the
+    call failed. A page read as having no records, or whose electronic record
+    skips a row number, is read once more at a higher resolution, keeping the
+    better reading. Pages only get here when they sit next to a House result, so
+    "no records" is more likely a misreading than a real answer."""
+    page = pymupdf.open(path)[page_no - 1]
+    user = f"GACETA: {json.dumps(meta, ensure_ascii=False)}\nPAGE: {page_no}\n\nMEMBERS:\n{members or '(not available)'}"
+    best = None
+    try:
+        for dpi in dpis:
+            out = call_llm(RECORD_PROMPT, user, page.get_pixmap(dpi=dpi).tobytes("png"), VISION_MODEL)
+            records = [r for r in out.get("records", []) if isinstance(r, dict) and r.get("rows")]
+            for r in records:
+                r["kind"] = str(r.get("kind", "")).strip().lower()
+            better = lambda a, b: (bool(a), -skipped_rows(a)) > (bool(b), -skipped_rows(b))
+            if best is None or better(records, best):
+                best = records
+            if best and not skipped_rows(best):
+                break
+    except BudgetExceeded:
+        raise
+    except Exception as e:
+        if best is None:
+            print(f"  {meta['source_file']}: voting record on page {page_no} failed: {e}", file=sys.stderr)
+            return [], str(e)
+    for r in best:
+        r["page"] = page_no
+    return best, None
+
+
+def numbers(s):
+    """Numbers in a title, ignoring leading zeros, with 2-digit years also as 4-digit
+    ("PLE.083/25" and "083 DEL 2025" share 83 and 2025)."""
+    out = set()
+    for n in re.findall(r"\d+", s or ""):
+        n = n.lstrip("0") or "0"
+        out.add(n)
+        if len(n) == 2:
+            out.add("20" + n)
+    return out
+
+
+def vote_side(value):
+    v = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().strip().lower()
+    return "si" if v.startswith("s") else "no" if v.startswith("n") else None
+
+
+def record_names(record, side):
+    return [(row.get("member") or row.get("printed") or "").strip() for row in record.get("rows", [])
+            if vote_side(row.get("vote")) == side and (row.get("member") or row.get("printed"))]
+
+
+def check_record(record):
+    """Why a record's rows don't match its own printed totals, or None."""
+    totals = record.get("totals") or {}
+    got = (len(record_names(record, "si")), len(record_names(record, "no")))
+    want = (totals.get("si"), totals.get("no"))
+    return None if got == want else f"{record.get('kind')} record on page {record.get('page')}: rows {got[0]}-{got[1]}, printed totals {want[0]}-{want[1]}"
+
+
+# The House announces a plenary result as manual plus electronic ("digital") votes, e.g.
+# "Para un total de 6 votos manuales por el sí, 83 votos electrónicos para un
+# total de 89 votos por el sí. Por el No, 0 votos manuales, 12 votos electrónicos."
+HOUSE_RESULT = re.compile(r"por\s+el\s+s[ií]\b(?P<si>.{0,900}?)por\s+el\s+no\b(?P<no>.{0,500}?)"
+                          r"(?:ha(?:n)?\s+sido|se\s+ha|señor|honorables|PUBLICACI|$)", re.I | re.S)
+COUNT = r"(\d+|un[oa]?|cero)"
+
+
+def count(word):
+    return {"un": 1, "uno": 1, "una": 1, "cero": 0}.get(word.lower()) if not word.isdigit() else int(word)
+
+
+def house_result(text):
+    """The last House result announced in `text`: {"si": (manual, electronic, total), "no": (...)}
+    with None for parts it doesn't state, or None if there is no such result."""
+    found = [m for m in HOUSE_RESULT.finditer(text) if re.search(r"electr[oó]nic|digital", m.group(0), re.I)]
+    if not found:
+        return None
+    result = {}
+    for side in ("si", "no"):
+        seg = found[-1].group(side)
+        manual = re.search(COUNT + r"\s+votos?\s+manual", seg, re.I)
+        electronic = re.search(COUNT + r"\s+votos?\s+(?:electr|digital)", seg, re.I)
+        # "Para un total de 6 votos manuales ..., para un total de 89 votos": the
+        # overall total is the last one that isn't a count of manual votes.
+        totals = [m for m in re.finditer(r"total\s+(?:por\s+el\s+(?:s[ií]|no)\s+)?de\s+" + COUNT, seg, re.I)
+                  if not re.match(r"\s+votos?\s+manual", seg[m.end():], re.I)]
+        total = totals[-1] if totals else None
+        parts = [count(m.group(1)) if m else None for m in (manual, electronic, total)]
+        if parts[2] is None and parts[0] is not None and parts[1] is not None:
+            parts[2] = parts[0] + parts[1]
+        if parts[0] is None and parts[1] is not None and parts[2] is not None:
+            parts[0] = parts[2] - parts[1]
+        result[side] = tuple(parts)
+    return result
+
+
+def check_announced(electronic, manual, announced):
+    """Problems comparing records with the result announced in the text."""
+    if announced is None:
+        return []
+    problems = []
+    for side in ("si", "no"):
+        want_manual, want_electronic, want_total = announced[side]
+        got_electronic = len(record_names(electronic, side))
+        got_manual = len(record_names(manual, side)) if manual else 0
+        if want_electronic is not None and got_electronic != want_electronic:
+            problems.append(f"electronic {side}: record has {got_electronic}, text announces {want_electronic}")
+        if want_total is not None and got_electronic + got_manual != want_total:
+            problems.append(f"total {side}: records have {got_electronic + got_manual}, text announces {want_total}")
+    return problems
+
+
+def attach_records(votes, records, pages=()):
+    """Give votes their full name lists from scanned voting records.
+
+    Each electronic record is paired with a manual record on the same page, or
+    on the next page with a shared number (the bill) in its title, and with the
+    text vote that begins up to four pages before it, preferring one whose bill
+    number appears in the record's title. The text still says what was voted;
+    the records say who voted how. A record with no text vote becomes a vote of
+    its own. Votes get verified = 1 when every record's rows match its printed
+    totals and the result announced in the text (`pages`, where the model can't
+    have influenced it), 0 with the reasons in check_note otherwise."""
+    electronic = sorted((r for r in records if r.get("kind") == "electronic"), key=lambda r: r["page"])
+    manual = [r for r in records if r.get("kind") == "manual"]
+    # Join records that run onto the next page: rows there come without a title
+    # or totals (0-0), and belong to the record before whose rows fall short.
+    is_continuation = lambda r: not (r.get("title") or "").strip() and not any((r.get("totals") or {}).values())
+    for e in electronic:
+        if is_continuation(e):
+            continue
+        want = sum(v or 0 for v in (e.get("totals") or {}).values())
+        for c in electronic:
+            if len(e["rows"]) >= want:
+                break
+            if c["page"] == e["page"] + 1 and is_continuation(c) and not c.get("merged"):
+                e["rows"] = e["rows"] + c["rows"]
+                c["merged"] = True
+    electronic = [e for e in electronic if not e.get("merged")]
+    used_votes, used_manual, extra = set(), set(), []
+    for e in electronic:
+        next_page_has_own = any(o["page"] == e["page"] + 1 for o in electronic)  # continuations are gone by now
+        pair = [i for i, m in enumerate(manual) if i not in used_manual and (
+            m["page"] == e["page"] or (m["page"] == e["page"] + 1 and (
+                numbers(m.get("title")) & numbers(e.get("title")) or not next_page_has_own)))]
+        parts = [e] + ([manual[pair[0]]] if pair else [])
+        used_manual.update(pair[:1])
+        cands = [i for i, v in enumerate(votes) if i not in used_votes and page_of(v) is not None
+                 and 0 <= e["page"] - page_of(v) <= 4]
+        best = max(cands, default=None, key=lambda i: (
+            bool(numbers(votes[i].get("bill_name")) & numbers(e.get("title"))), page_of(votes[i])))
+        problems = [p for p in map(check_record, parts) if p]
+        announced = house_result("\n".join(pages[max(0, e["page"] - 3):e["page"]]))
+        if announced is None:
+            problems.append("no announced result found in the text")
+        problems += check_announced(e, parts[1] if len(parts) > 1 else None, announced)
+        filled = {"yes": sum((record_names(r, "si") for r in parts), []),
+                  "no": sum((record_names(r, "no") for r in parts), []), "abstain": [],
+                  "source": "record", "verified": int(not problems), "check_note": "; ".join(problems) or None}
+        if best is not None:
+            used_votes.add(best)
+            votes[best].update(filled)
+        else:
+            day = re.match(r"(\d{2})/(\d{2})/(\d{4})", e.get("date") or "")
+            extra.append({"session_date": f"{day.group(3)}-{day.group(2)}-{day.group(1)}" if day else None,
+                          "bill_name": e.get("title"), "subject": e.get("title"), "result": "unknown",
+                          "page": e["page"], **filled})
+    # A House plenary vote whose result counts electronic votes but got no record
+    # has only the members who voted by hand, so it can't be taken as complete.
+    for i, v in enumerate(votes):
+        if i in used_votes or page_of(v) is None or not pages:
+            continue
+        announced = house_result("\n".join(pages[max(0, page_of(v) - 1):page_of(v) + 2]))
+        if announced and any((announced[side][1] or 0) > 0 for side in ("si", "no")):
+            v.update(verified=0, check_note="the text counts electronic votes, but no voting record was read for "
+                                            "this vote, so only members who voted by hand are listed")
+    return votes + extra
+
+
+def recheck_records(doc):
+    """Read again, at a higher resolution, the record pages of votes whose rows
+    don't add up, and keep the new readings if they verify more votes."""
+    votes = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
+    bad = {int(p) for v in votes if v.get("verified") == 0
+           for p in re.findall(r"record on page (\d+)", v.get("check_note") or "")}
+    if not bad:
+        return votes
+    retry = {p: extract_record_page(*doc["record_args"][p], dpis=(RECORD_RETRY_DPI,))[0] for p in bad if p in doc["record_args"]}
+    records = [r for r in doc["records"] if r["page"] not in retry] + [r for rs in retry.values() for r in rs]
+    again = attach_records([dict(v) for v in doc["found"]], records, doc["page_texts"])
+    verified = lambda vs: sum(v.get("verified") == 1 for v in vs)
+    return again if verified(again) > verified(votes) else votes
+
+
 # ---------- output ----------
 
 SCHEMA = """
@@ -341,6 +644,8 @@ CREATE TABLE IF NOT EXISTS documents (
     pages            INTEGER NOT NULL,
     chunks           INTEGER NOT NULL,      -- 5-page windows sent to the model
     chunks_failed    INTEGER NOT NULL,      -- > 0 means this document's votes are incomplete
+    record_pages     INTEGER NOT NULL DEFAULT 0,  -- page images read for voting records
+    record_pages_failed INTEGER NOT NULL DEFAULT 0,
     model            TEXT NOT NULL,
     prompt_sha256    TEXT NOT NULL,         -- which version of PROMPT produced the rows
     processed_at     TEXT NOT NULL
@@ -359,12 +664,17 @@ CREATE TABLE IF NOT EXISTS votes (
     vote_type    TEXT CHECK (vote_type IN ('final_passage', 'articles', 'report_motion',
                                            'impedimento', 'procedural')),  -- NULL if the model gave none
     page         INTEGER,                   -- gazette page where the vote begins, as reported by the model
+    source       TEXT NOT NULL DEFAULT 'text' CHECK (source IN ('text', 'record')),
+                                            -- where the names come from: the text, or scanned voting records
+    verified     INTEGER,                   -- records only: 1 if the rows match the printed totals, else 0
+    check_note   TEXT,                      -- why verified is 0
     raw_json     TEXT NOT NULL              -- the model's output for this vote, unmodified
 );
 
 CREATE TABLE IF NOT EXISTS vote_records (
     vote_id    INTEGER NOT NULL REFERENCES votes (id) ON DELETE CASCADE,
-    legislator TEXT NOT NULL,               -- name as written in the gazette
+    legislator TEXT NOT NULL,               -- name as written in the gazette; for records, the matching
+                                            -- name from the legislators list when the model found one
     vote       TEXT NOT NULL CHECK (vote IN ('yes', 'no', 'abstain')),
     UNIQUE (vote_id, legislator, vote)
 );
@@ -423,6 +733,14 @@ def open_db(path):
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    for table, column, decl in [
+            ("documents", "record_pages", "INTEGER NOT NULL DEFAULT 0"),
+            ("documents", "record_pages_failed", "INTEGER NOT NULL DEFAULT 0"),
+            ("votes", "source", "TEXT NOT NULL DEFAULT 'text'"),
+            ("votes", "verified", "INTEGER"),
+            ("votes", "check_note", "TEXT")]:
+        if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     return conn
 
 
@@ -434,9 +752,11 @@ def save_document(conn, doc, found):
         conn.execute("DELETE FROM documents WHERE sha256 = ?", (doc["sha256"],))
         doc_id = conn.execute(
             """INSERT INTO documents (sha256, source_file, gaceta_number, publication_date, chamber,
-                   pages, chunks, chunks_failed, model, prompt_sha256, processed_at)
+                   pages, chunks, chunks_failed, record_pages, record_pages_failed,
+                   model, prompt_sha256, processed_at)
                VALUES (:sha256, :source_file, :gaceta_number, :publication_date, :chamber,
-                   :pages, :chunks, :chunks_failed, :model, :prompt_sha256, :processed_at)""",
+                   :pages, :chunks, :chunks_failed, :record_pages, :record_pages_failed,
+                   :model, :prompt_sha256, :processed_at)""",
             {**doc, "processed_at": datetime.now(UTC).isoformat(timespec="seconds")},
         ).lastrowid
         for v in sorted(found, key=lambda v: page_of(v) or 0):
@@ -444,13 +764,15 @@ def save_document(conn, doc, found):
                 continue  # the prompt asks only for votes with named voters
             cur = conn.execute(
                 """INSERT INTO votes (document_id, session_date, acta, bill_name, bill_title,
-                       subject, description, result, vote_type, page, raw_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       subject, description, result, vote_type, page, source, verified,
+                       check_note, raw_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (doc_id, v.get("session_date"), v.get("acta"), v.get("bill_name"),
                  v.get("bill_title"), v.get("subject"), v.get("description"),
                  v.get("result") if v.get("result") in RESULTS else "unknown",
                  v.get("vote_type") if v.get("vote_type") in VOTE_TYPES else None,
-                 page_of(v), json.dumps(v, ensure_ascii=False)),
+                 page_of(v), v.get("source", "text"), v.get("verified"), v.get("check_note"),
+                 json.dumps(v, ensure_ascii=False)),
             )
             saved += 1
             conn.executemany(
@@ -464,52 +786,72 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pdfs", nargs="+")
     ap.add_argument("--db", default="votes.db", help="SQLite database to write (created if missing)")
+    ap.add_argument("--legislators", help="pipeline database with the legislators tables (cva.db); "
+                    "lets the model name members exactly when reading scanned voting records")
     args = ap.parse_args()
     if "LLM_API_KEY" not in os.environ:
         sys.exit("Set LLM_API_KEY")
 
     conn = open_db(args.db)
-    prompt_sha256 = hashlib.sha256(PROMPT.encode()).hexdigest()
-    docs, jobs = [], []
+    legislators = sqlite3.connect(f"file:{args.legislators}?mode=ro", uri=True) if args.legislators else None
+    prompt_sha256 = hashlib.sha256((PROMPT + RECORD_PROMPT).encode()).hexdigest()
+    docs, jobs, record_jobs = [], [], []
     for path in args.pdfs:
         pages = load_pages(path)
         chunks = build_chunks(pages)
+        recs = record_pages(path, pages)
         with open(path, "rb") as f:
             sha256 = hashlib.sha256(f.read()).hexdigest()
         meta = {**gaceta_meta(pages[0]), "source_file": os.path.basename(path)}
         doc = {**meta, "sha256": sha256, "pages": len(pages), "chunks": len(chunks),
-               "chunks_failed": 0, "model": MODEL, "prompt_sha256": prompt_sha256,
-               "pending": len(chunks), "found": []}
+               "chunks_failed": 0, "record_pages": len(recs), "record_pages_failed": 0,
+               "model": MODEL, "prompt_sha256": prompt_sha256,
+               "pending": len(chunks) + len(recs), "found": [], "records": [], "page_texts": pages,
+               "record_args": {}}
         docs.append(doc)
         jobs += [(doc, meta, c) for c in chunks]
-        print(f"{path}: {len(pages)} pages, {len(chunks)} chunks", file=sys.stderr)
+        for page_no in recs:
+            m = RECORD_DATE.search(pages[page_no - 1])
+            day = f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else spanish_date(meta["publication_date"])
+            record_jobs.append((doc, meta, path, page_no, members_on(legislators, day)))
+            doc["record_args"][page_no] = (meta, path, page_no, record_jobs[-1][4])
+        print(f"{path}: {len(pages)} pages, {len(chunks)} chunks"
+              + (f", {len(recs)} voting-record pages" if recs else ""), file=sys.stderr)
 
     total = 0
     for doc in docs:
         if not doc["pending"]:  # no pages that look like votes; record it as processed
             save_document(conn, doc, [])
 
-    print(f"Calling {MODEL} ({API_STYLE}) on {len(jobs)} chunks...", file=sys.stderr)
+    print(f"Calling {MODEL} ({API_STYLE}) on {len(jobs)} chunks"
+          + (f" and {VISION_MODEL} on {len(record_jobs)} voting-record pages" if record_jobs else "") + "...",
+          file=sys.stderr)
     ex = ThreadPoolExecutor(WORKERS)
-    futures = {ex.submit(extract_chunk, meta, c): (doc, c[0]) for doc, meta, c in jobs}
+    futures = {ex.submit(extract_chunk, meta, c): ("chunk", doc, c[0]) for doc, meta, c in jobs}
+    futures |= {ex.submit(extract_record_page, meta, path, page_no, members): ("record", doc, page_no)
+                for doc, meta, path, page_no, members in record_jobs}
     try:
         for fut in as_completed(futures):
-            doc, start = futures[fut]
-            votes, error = fut.result()
-            doc["chunks_failed"] += error is not None
-            doc["found"] += [v for v in votes
-                             if isinstance(v, dict) and keep_vote(v, start, doc["pages"])]
+            kind, doc, start = futures[fut]
+            result, error = fut.result()
+            if kind == "chunk":
+                doc["chunks_failed"] += error is not None
+                doc["found"] += [v for v in result
+                                 if isinstance(v, dict) and keep_vote(v, start, doc["pages"])]
+            else:
+                doc["record_pages_failed"] += error is not None
+                doc["records"] += result
             doc["pending"] -= 1
             if not doc["pending"]:
-                total += save_document(conn, doc, doc["found"])
+                total += save_document(conn, doc, recheck_records(doc))
     except BudgetExceeded as e:
         ex.shutdown(wait=False, cancel_futures=True)
         sys.exit(f"Stopping: the LLM account is out of budget ({e}). "
                  f"Documents finished so far are saved in {args.db}.")
     ex.shutdown()
-    failed = sum(d["chunks_failed"] for d in docs)
+    failed = sum(d["chunks_failed"] + d["record_pages_failed"] for d in docs)
     print(f"Wrote {total} votes from {len(docs)} PDFs to {args.db}"
-          + (f"; {failed} chunks failed, see documents.chunks_failed" if failed else ""),
+          + (f"; {failed} calls failed, see documents.chunks_failed and record_pages_failed" if failed else ""),
           file=sys.stderr)
 
 if __name__ == "__main__":
