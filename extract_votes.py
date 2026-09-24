@@ -49,10 +49,18 @@ TEMPERATURE = float(os.environ["LLM_TEMPERATURE"]) if os.environ.get("LLM_TEMPER
 # default. Accepted values differ by model. Not sent for the anthropic style.
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT") or None
 REQUEST_TIMEOUT = 600  # seconds; a chunk with long roll calls can take minutes
-WORKERS = 8
+WORKERS = int(os.environ.get("LLM_WORKERS", "8"))  # parallel calls
 MAX_ATTEMPTS = 6
 
-VOTE_HINT = re.compile(r"votaci[oó]n|\bvot[oa]n? s[ií]\b|por el s[ií]|por el no|total votos|abstenci", re.I)
+# Only windows with signs that a roll call took place go to the model: an announced
+# result ("Por el Sí: 45", "Por el SÍ veintiún (21)"), a closed vote ("se cierra la
+# votación", "Cierre Registro", "cerrado el registro"), a "votación nominal" heading or
+# a labeled vote table. Mentions of voting alone are far more common (agendas,
+# speeches) and made ~4x as many calls without adding gazettes with roll calls.
+ROLL_CALL_HINT = re.compile(
+    r"por\s+el\s+s[ií]\b\W{0,6}(?:[a-záéíóúñ]+\s+){0,3}\(?\d"
+    r"|(?:cierr[ae]n?|cerrad[oa])\s+(?:el\s+|la\s+)?(?:registro|votaci)"
+    r"|votaci[oó]n\s+nominal|X\[S[ÍI]\]|X\[NO\]", re.I)
 ACTA_RE = re.compile(r"ACTA\s+N[ÚU]MERO\s+\d+\s+DE\s+\d{4}", re.I)
 # A bill read for debate starts its own line; agenda items are numbered ("1. Proyecto...") or bulleted ("•").
 BILL_RE = re.compile(r"(?<![•\n]\n)^Proyecto\s+de\s+(?:ley|acto\s+legislativo)\s+n[úu]mero\s+\d+\s+de\s+\d{4}", re.I | re.M)
@@ -193,7 +201,7 @@ def build_chunks(pages):
     for start in range(0, len(pages), step):
         body = "\n\n".join(f"--- page {start + j + 1} ---\n{pages[start + j]}"
                            for j in range(min(PAGES_PER_CHUNK, len(pages) - start)))
-        if not VOTE_HINT.search(body):
+        if not ROLL_CALL_HINT.search(body):
             continue
         ctx = next((c for i, c in reversed(acta_starts) if i <= start), "")
         bill = next((b for i, b in reversed(bill_starts) if i < start), "")
@@ -420,6 +428,8 @@ def save_document(conn, doc, found):
             {**doc, "processed_at": datetime.now(UTC).isoformat(timespec="seconds")},
         ).lastrowid
         for v in sorted(found, key=lambda v: page_of(v) or 0):
+            if not (names(v, "yes") or names(v, "no")):
+                continue  # the prompt asks only for votes with named voters
             cur = conn.execute(
                 """INSERT INTO votes (document_id, session_date, acta, bill_name, bill_title,
                        subject, description, result, vote_type, page, raw_json)
