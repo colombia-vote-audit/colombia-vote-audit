@@ -7,7 +7,7 @@ Usage:
 
 The database has one row per PDF in `documents`, one per vote in `votes` and
 one per (vote, legislator) in `vote_records`; see SCHEMA below. Each PDF's
-results are saved as soon as its call(s) finish, and re-running a PDF replaces
+results are saved as soon as its chunks finish, and re-running a PDF replaces
 its earlier results.
 
 Only dependency: PyMuPDF (pip install pymupdf). LLM calls go to an OpenAI-compatible gateway (LLM_BASE_URL).
@@ -15,7 +15,6 @@ Only dependency: PyMuPDF (pip install pymupdf). LLM calls go to an OpenAI-compat
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import sqlite3
@@ -36,15 +35,19 @@ API_STYLE = os.environ.get("LLM_API_STYLE", "anthropic" if MODEL.startswith("cla
 # Some gateways (e.g. OpenCode's) sit behind Cloudflare, which rejects urllib's default User-Agent.
 USER_AGENT = "colombia-vote-audit/0.1"
 
-# Each gazette goes to the model in one call. Only gazettes too big for that are
-# split, into the fewest roughly equal parts, overlapping by one page.
-MAX_PART_TOKENS = 200_000
-CHARS_PER_TOKEN = 3.5  # rough, for Spanish text
+# Gazettes go to the model as 5-page windows overlapping by one page. Sending
+# whole gazettes was tried and found ~30% fewer votes on the sample.
+PAGES_PER_CHUNK = 5
+PAGE_OVERLAP = 1
 MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "65536"))
-REQUEST_TIMEOUT = 900  # seconds; a whole session record can take minutes
+REQUEST_TIMEOUT = 600  # seconds; a chunk with long roll calls can take minutes
 WORKERS = 8
 MAX_ATTEMPTS = 6
 
+VOTE_HINT = re.compile(r"votaci[oó]n|\bvot[oa]n? s[ií]\b|por el s[ií]|por el no|total votos|abstenci", re.I)
+ACTA_RE = re.compile(r"ACTA\s+N[ÚU]MERO\s+\d+\s+DE\s+\d{4}", re.I)
+# A bill read for debate starts its own line; agenda items are numbered ("1. Proyecto...") or bulleted ("•").
+BILL_RE = re.compile(r"(?<![•\n]\n)^Proyecto\s+de\s+(?:ley|acto\s+legislativo)\s+n[úu]mero\s+\d+\s+de\s+\d{4}", re.I | re.M)
 COLUMN_HEADERS = {"SÍ", "SI", "NO", "ABST", "ABSTENCIÓN", "ABSTENCION", "ABSTENIDO"}
 
 PROMPT = """You extract roll-call votes from the official record of the Colombian Congress for a public transparency project. Citizens will use your output to see how each legislator voted, so record only what the text supports: never guess a name, a vote or a result. If a name is unreadable, leave it out.
@@ -53,11 +56,10 @@ PROMPT = """You extract roll-call votes from the official record of the Colombia
 
 The Gaceta del Congreso is the Congress's official gazette. Many issues contain actas: the minutes of plenary or committee sessions of the Senado or the Cámara de Representantes. In a nominal vote the secretary calls the roll and each member answers "Sí" or "No". The minutes then list the names, often in a table, and announce the result (for example "por el Sí: 45, por el No: 12").
 
-The user message has two parts:
+The user message has three parts:
 - GACETA: metadata about the gazette issue.
-- TEXT: the pages of the gazette, each starting with "--- page N ---". Usually this is the whole gazette. Very large gazettes are sent in parts that overlap by one page; then the TEXT says which part it is, and a vote cut off at its start or end should be skipped, because the neighboring part contains it whole.
-
-A gazette can contain several actas and many votes. Include every vote in the TEXT, in the order they appear. Take each vote's session date and acta from the acta it appears in.
+- ACTA HEADER / ROLL CALL: the start of the acta the text belongs to (session date, chamber, attendance), and the bill under discussion when the text begins, if known. Use it for context only; never extract votes from it.
+- TEXT: a few consecutive pages, each starting with "--- page N ---". Extract votes only from this part. Chunks overlap by one page, so a vote may be cut off at the start or end of the TEXT; skip a vote unless both its start and its result are in the TEXT.
 
 The text was extracted automatically from a PDF, so expect broken lines, merged columns, hyphenated words and page headers in the middle of sentences. In vote tables, each "X" has been labeled with the column it falls under, e.g. "X[SÍ]" or "X[NO]".
 
@@ -78,12 +80,21 @@ Return only a json object: {"votes": [ ... ]}. If the TEXT contains no votes, re
   "bill_name": "string",               // e.g. "Proyecto de Ley 53 de 2022 Senado", or "Proposición 140 y 141", or "Actas 026 y 030"
   "bill_title": "string",              // official title ("por la cual se ...") if stated, else ""
   "subject": "string",                 // what exactly was voted: e.g. "articulado", "título", "proposición con que termina el informe de ponencia", "orden del día", "aprobación de actas"
+  "vote_type": "final_passage" | "articles" | "report_motion" | "impedimento" | "procedural",
   "description": "string",             // 1-2 sentence plain-language summary of what the vote was about, written in Spanish
   "result": "approved" | "rejected" | "unknown",
+  "page": int,                         // the "--- page N ---" number where the vote begins
   "yes": ["Full Name", ...],           // members who voted Sí
   "no": ["Full Name", ...],            // members who voted No
   "abstain": ["Full Name", ...]        // members recorded as abstaining; [] if none are named
 }
+
+vote_type is one of:
+- "final_passage": the bill as a whole at the end of a debate: its title and/or the question of whether it should become law or go to the next debate, or approval of a conciliation report.
+- "articles": the articulado, or particular articles with or without amendments.
+- "report_motion": the proposición con que termina el informe de ponencia (whether to debate the bill at all), including motions to archive it.
+- "impedimento": whether a member with a conflict of interest may abstain from the bill (impedimentos and recusaciones).
+- "procedural": anything else, such as the order of the day, skipping the reading of the articulado, approval of minutes, or motions not about a bill's text.
 
 Rules:
 - Use names exactly as written in the roll call (surnames first is fine).
@@ -93,10 +104,10 @@ Rules:
 
 This example only shows the format. Never copy its names or details into your output.
 
-TEXT (whole gazette):
---- page 1 ---
+ACTA HEADER / ROLL CALL:
 ACTA NÚMERO 45 DE 2021 (septiembre 7) Sesión plenaria del Senado de la República
-...
+
+TEXT:
 --- page 12 ---
 La Presidencia abre la votación nominal de la proposición con que termina el informe de ponencia del Proyecto de ley número 123 de 2021 Senado, "por medio de la cual se crea el registro nacional de cuidadores".
 Votación nominal
@@ -109,7 +120,7 @@ Vargas Ruiz Marta Lucía
 La Secretaría informa el resultado: por el Sí, 3 votos; por el No, 1 voto. En consecuencia, ha sido aprobada la proposición.
 
 JSON output:
-{"votes": [{"session_date": "2021-09-07", "acta": "Acta 45 de 2021", "bill_name": "Proyecto de Ley 123 de 2021 Senado", "bill_title": "por medio de la cual se crea el registro nacional de cuidadores", "subject": "proposición con que termina el informe de ponencia", "description": "La plenaria del Senado aprobó la proposición con que termina el informe de ponencia del proyecto que crea el registro nacional de cuidadores.", "result": "approved", "yes": ["Pérez Gómez Ana María", "Rodríguez Díaz Luis Alberto", "Torres Muñoz Carlos"], "no": ["Vargas Ruiz Marta Lucía"], "abstain": []}]}
+{"votes": [{"session_date": "2021-09-07", "acta": "Acta 45 de 2021", "bill_name": "Proyecto de Ley 123 de 2021 Senado", "bill_title": "por medio de la cual se crea el registro nacional de cuidadores", "subject": "proposición con que termina el informe de ponencia", "vote_type": "report_motion", "description": "La plenaria del Senado aprobó la proposición con que termina el informe de ponencia del proyecto que crea el registro nacional de cuidadores.", "result": "approved", "page": 12, "yes": ["Pérez Gómez Ana María", "Rodríguez Díaz Luis Alberto", "Torres Muñoz Carlos"], "no": ["Vargas Ruiz Marta Lucía"], "abstain": []}]}
 """
 
 
@@ -155,21 +166,35 @@ def gaceta_meta(first_page):
     }
 
 
-def split_pages(pages):
-    """Page ranges (start, end) to send, one call each: the whole gazette if it
-    fits in MAX_PART_TOKENS, otherwise the fewest roughly equal parts that do,
-    each overlapping the previous by one page."""
-    sizes = [len(p) / CHARS_PER_TOKEN for p in pages]
-    n = max(1, math.ceil(sum(sizes) / MAX_PART_TOKENS))
-    target = sum(sizes) / n
-    parts, start, acc = [], 0, 0.0
-    for i, size in enumerate(sizes):
-        acc += size
-        if acc >= target and len(parts) < n - 1 and i + 1 < len(pages):
-            parts.append((start, i + 1))
-            start, acc = i, size  # the next part starts again at this page
-    parts.append((start, len(pages)))
-    return parts
+def build_chunks(pages):
+    """Page-window chunks that contain vote keywords, each prefixed with the current acta's header/roll call."""
+    acta_starts = []  # (page_idx, header_context)
+    for i, t in enumerate(pages):
+        for m in ACTA_RE.finditer(t):
+            ctx = (t[m.start():] + "\n" + (pages[i + 1] if i + 1 < len(pages) else ""))[:3500]
+            acta_starts.append((i, ctx))
+
+    bill_starts = []  # (page_idx, heading + title)
+    for i, t in enumerate(pages):
+        for m in BILL_RE.finditer(t):
+            if not t[:m.start()].rstrip().endswith("•"):
+                bill_starts.append((i, " ".join(t[m.start():m.start() + 400].split())))
+
+    chunks = []
+    step = PAGES_PER_CHUNK - PAGE_OVERLAP
+    for start in range(0, len(pages), step):
+        body = "\n\n".join(f"--- page {start + j + 1} ---\n{pages[start + j]}"
+                           for j in range(min(PAGES_PER_CHUNK, len(pages) - start)))
+        if not VOTE_HINT.search(body):
+            continue
+        ctx = next((c for i, c in reversed(acta_starts) if i <= start), "")
+        bill = next((b for i, b in reversed(bill_starts) if i < start), "")
+        if bill:
+            ctx += f"\n\nBILL UNDER DISCUSSION WHEN THIS TEXT BEGINS (unless another one is introduced in the TEXT):\n{bill}"
+        chunks.append((start, ctx, body))
+        if start + PAGES_PER_CHUNK >= len(pages):
+            break
+    return chunks
 
 
 # ---------- LLM ----------
@@ -239,17 +264,18 @@ def parse_json(text):
     return json.loads(text[text.find("{"): text.rfind("}") + 1])
 
 
-def extract_part(meta, part):
-    """Votes the model found in one part of a gazette, and the error if the call failed."""
-    label, body = part
+def extract_chunk(meta, chunk):
+    """Votes the model found in one chunk, and the error if the call failed."""
+    start, ctx, body = chunk
     user = (f"GACETA: {json.dumps(meta, ensure_ascii=False)}\n\n"
-            f"TEXT ({label}):\n{body}")
+            f"ACTA HEADER / ROLL CALL (context only):\n{ctx}\n\n"
+            f"TEXT:\n{body}")
     try:
         return call_llm(PROMPT, user).get("votes", []), None
     except BudgetExceeded:
         raise
     except Exception as e:
-        print(f"  {meta['source_file']} ({label}) failed: {e}", file=sys.stderr)
+        print(f"  {meta['source_file']}: chunk at page {start + 1} failed: {e}", file=sys.stderr)
         return [], str(e)
 
 
@@ -264,8 +290,8 @@ CREATE TABLE IF NOT EXISTS documents (
     publication_date TEXT,
     chamber          TEXT,
     pages            INTEGER NOT NULL,
-    parts            INTEGER NOT NULL,      -- calls to the model: 1 unless the gazette was split
-    parts_failed     INTEGER NOT NULL,      -- > 0 means this document's votes are incomplete
+    chunks           INTEGER NOT NULL,      -- 5-page windows sent to the model
+    chunks_failed    INTEGER NOT NULL,      -- > 0 means this document's votes are incomplete
     model            TEXT NOT NULL,
     prompt_sha256    TEXT NOT NULL,         -- which version of PROMPT produced the rows
     processed_at     TEXT NOT NULL
@@ -274,7 +300,6 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS votes (
     id           INTEGER PRIMARY KEY,
     document_id  INTEGER NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
-    fingerprint  TEXT NOT NULL,             -- drops the same vote found in two overlapping parts
     session_date TEXT,
     acta         TEXT,
     bill_name    TEXT,
@@ -282,9 +307,10 @@ CREATE TABLE IF NOT EXISTS votes (
     subject      TEXT,
     description  TEXT,
     result       TEXT NOT NULL CHECK (result IN ('approved', 'rejected', 'unknown')),
-    source_page  INTEGER NOT NULL,          -- first page of the part the vote came from
-    raw_json     TEXT NOT NULL,             -- the model's output for this vote, unmodified
-    UNIQUE (document_id, fingerprint)
+    vote_type    TEXT CHECK (vote_type IN ('final_passage', 'articles', 'report_motion',
+                                           'impedimento', 'procedural')),  -- NULL if the model gave none
+    page         INTEGER,                   -- gazette page where the vote begins, as reported by the model
+    raw_json     TEXT NOT NULL              -- the model's output for this vote, unmodified
 );
 
 CREATE TABLE IF NOT EXISTS vote_records (
@@ -305,6 +331,7 @@ GROUP BY v.id;
 """
 
 RESULTS = {"approved", "rejected", "unknown"}
+VOTE_TYPES = {"final_passage", "articles", "report_motion", "impedimento", "procedural"}
 
 
 def norm(s):
@@ -312,10 +339,34 @@ def norm(s):
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
-def fingerprint(v):
-    key = "|".join([v.get("session_date") or "", norm(v.get("bill_name")), norm(v.get("subject")),
-                    str(len(v.get("yes") or [])), str(len(v.get("no") or []))])
-    return hashlib.sha1(key.encode()).hexdigest()[:12]
+def names(v, key):
+    return frozenset(n.strip() for n in v.get(key) or [] if isinstance(n, str) and n.strip())
+
+
+def page_of(v):
+    """The page the model says the vote begins on, or None if it gave no usable one."""
+    try:
+        return int(v.get("page"))
+    except (TypeError, ValueError):
+        return None
+
+
+def owned_pages(start, n_pages):
+    """1-based pages whose votes the chunk starting at `start` keeps. Its last
+    page is the first page of the next chunk, which owns votes beginning there;
+    the last chunk owns everything to the end."""
+    step = PAGES_PER_CHUNK - PAGE_OVERLAP
+    last = start + PAGES_PER_CHUNK >= n_pages
+    return range(start + 1, (n_pages if last else start + step) + 1)
+
+
+def keep_vote(v, start, n_pages):
+    """Keep a vote only in the chunk that owns the page it begins on, so a vote
+    on the page two chunks share is stored once. Votes without a usable page
+    in this chunk are kept, since we can't tell which chunk should have them."""
+    page = page_of(v)
+    shown = range(start + 1, min(start + PAGES_PER_CHUNK, n_pages) + 1)
+    return page not in shown or page in owned_pages(start, n_pages)
 
 
 def open_db(path):
@@ -327,35 +378,33 @@ def open_db(path):
 
 
 def save_document(conn, doc, found):
-    """Replace everything stored for this PDF. `found` is [(source_page, vote), ...].
-    Returns the number of votes saved after dropping duplicates."""
+    """Replace everything stored for this PDF with the votes in `found`.
+    Returns the number of votes saved."""
     saved = 0
     with conn:
         conn.execute("DELETE FROM documents WHERE sha256 = ?", (doc["sha256"],))
         doc_id = conn.execute(
             """INSERT INTO documents (sha256, source_file, gaceta_number, publication_date, chamber,
-                   pages, parts, parts_failed, model, prompt_sha256, processed_at)
+                   pages, chunks, chunks_failed, model, prompt_sha256, processed_at)
                VALUES (:sha256, :source_file, :gaceta_number, :publication_date, :chamber,
-                   :pages, :parts, :parts_failed, :model, :prompt_sha256, :processed_at)""",
+                   :pages, :chunks, :chunks_failed, :model, :prompt_sha256, :processed_at)""",
             {**doc, "processed_at": datetime.now(UTC).isoformat(timespec="seconds")},
         ).lastrowid
-        for page, v in sorted(found, key=lambda pv: pv[0]):
+        for v in sorted(found, key=lambda v: page_of(v) or 0):
             cur = conn.execute(
-                """INSERT OR IGNORE INTO votes (document_id, fingerprint, session_date, acta, bill_name,
-                       bill_title, subject, description, result, source_page, raw_json)
+                """INSERT INTO votes (document_id, session_date, acta, bill_name, bill_title,
+                       subject, description, result, vote_type, page, raw_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, fingerprint(v), v.get("session_date"), v.get("acta"), v.get("bill_name"),
+                (doc_id, v.get("session_date"), v.get("acta"), v.get("bill_name"),
                  v.get("bill_title"), v.get("subject"), v.get("description"),
                  v.get("result") if v.get("result") in RESULTS else "unknown",
-                 page, json.dumps(v, ensure_ascii=False)),
+                 v.get("vote_type") if v.get("vote_type") in VOTE_TYPES else None,
+                 page_of(v), json.dumps(v, ensure_ascii=False)),
             )
-            if not cur.rowcount:
-                continue  # the same vote from the overlapping page of two parts
             saved += 1
             conn.executemany(
                 "INSERT OR IGNORE INTO vote_records (vote_id, legislator, vote) VALUES (?, ?, ?)",
-                [(cur.lastrowid, name.strip(), k) for k in ("yes", "no", "abstain")
-                 for name in v.get(k) or [] if isinstance(name, str) and name.strip()],
+                [(cur.lastrowid, name, k) for k in ("yes", "no", "abstain") for name in names(v, k)],
             )
     return saved
 
@@ -373,37 +422,32 @@ def main():
     docs, jobs = [], []
     for path in args.pdfs:
         pages = load_pages(path)
+        chunks = build_chunks(pages)
         with open(path, "rb") as f:
             sha256 = hashlib.sha256(f.read()).hexdigest()
         meta = {**gaceta_meta(pages[0]), "source_file": os.path.basename(path)}
-        # Scanned gazettes have no text to send.
-        ranges = split_pages(pages) if sum(len(p.strip()) for p in pages) > 200 else []
-        parts = []
-        for k, (a, b) in enumerate(ranges, start=1):
-            label = "whole gazette" if len(ranges) == 1 else f"part {k} of {len(ranges)}, pages {a + 1}-{b}"
-            body = "\n\n".join(f"--- page {j + 1} ---\n{pages[j]}" for j in range(a, b))
-            parts.append((a, (label, body)))
-        doc = {**meta, "sha256": sha256, "pages": len(pages), "parts": len(parts),
-               "parts_failed": 0, "model": MODEL, "prompt_sha256": prompt_sha256,
-               "pending": len(parts), "found": []}
+        doc = {**meta, "sha256": sha256, "pages": len(pages), "chunks": len(chunks),
+               "chunks_failed": 0, "model": MODEL, "prompt_sha256": prompt_sha256,
+               "pending": len(chunks), "found": []}
         docs.append(doc)
-        jobs += [(doc, meta, start, part) for start, part in parts]
-        print(f"{path}: {len(pages)} pages, {len(parts)} part(s)", file=sys.stderr)
+        jobs += [(doc, meta, c) for c in chunks]
+        print(f"{path}: {len(pages)} pages, {len(chunks)} chunks", file=sys.stderr)
 
     total = 0
     for doc in docs:
-        if not doc["pending"]:  # nothing to send; record it as processed
+        if not doc["pending"]:  # no pages that look like votes; record it as processed
             save_document(conn, doc, [])
 
-    print(f"Calling {MODEL} ({API_STYLE}) on {len(jobs)} parts...", file=sys.stderr)
+    print(f"Calling {MODEL} ({API_STYLE}) on {len(jobs)} chunks...", file=sys.stderr)
     ex = ThreadPoolExecutor(WORKERS)
-    futures = {ex.submit(extract_part, meta, part): (doc, start) for doc, meta, start, part in jobs}
+    futures = {ex.submit(extract_chunk, meta, c): (doc, c[0]) for doc, meta, c in jobs}
     try:
         for fut in as_completed(futures):
             doc, start = futures[fut]
             votes, error = fut.result()
-            doc["parts_failed"] += error is not None
-            doc["found"] += [(start + 1, v) for v in votes if isinstance(v, dict)]
+            doc["chunks_failed"] += error is not None
+            doc["found"] += [v for v in votes
+                             if isinstance(v, dict) and keep_vote(v, start, doc["pages"])]
             doc["pending"] -= 1
             if not doc["pending"]:
                 total += save_document(conn, doc, doc["found"])
@@ -412,9 +456,9 @@ def main():
         sys.exit(f"Stopping: the LLM account is out of budget ({e}). "
                  f"Documents finished so far are saved in {args.db}.")
     ex.shutdown()
-    failed = sum(d["parts_failed"] for d in docs)
+    failed = sum(d["chunks_failed"] for d in docs)
     print(f"Wrote {total} votes from {len(docs)} PDFs to {args.db}"
-          + (f"; {failed} parts failed, see documents.parts_failed" if failed else ""),
+          + (f"; {failed} chunks failed, see documents.chunks_failed" if failed else ""),
           file=sys.stderr)
 
 if __name__ == "__main__":
