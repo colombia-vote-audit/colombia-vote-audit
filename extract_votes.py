@@ -15,8 +15,9 @@ in scanned voting records printed as images. Those pages are read from the
 image (LLM_VISION_MODEL, default LLM_MODEL), and each result is checked against
 the record's printed totals and the result announced in the text; votes that
 don't add up are stored with verified = 0 and the reason. With --legislators
-(the pipeline database), the model picks each name from the members of
-Congress at the time instead of spelling it from the scan.
+(the pipeline database), the model gives each row as a number from a list of
+the House members sitting that day instead of spelling the name from the scan,
+and each number is checked against the surname printed on the row.
 
 Only dependency: PyMuPDF (pip install pymupdf). LLM calls go to an OpenAI-compatible gateway (LLM_BASE_URL).
 """
@@ -160,15 +161,15 @@ JSON output:
 
 RECORD_PROMPT = """This page image is from Colombia's Gaceta del Congreso. It may contain voting records: electronic records ("PUBLICACIÓN REGISTRO DE VOTACIÓN": a numbered list of members with Sí or No, and a small totals box) and manual records ("REGISTRO MANUAL": a table with SI and NO columns marked with X and a TOTAL row). Attendance lists, agendas and other scanned pages are not voting records.
 
-MEMBERS lists the members of Congress around the date of the vote. For every row, give the name exactly as printed and the member it refers to, copied exactly from MEMBERS, or null if none fits. Printed names are surnames first and may be abbreviated or misspelled.
+MEMBERS is a numbered list of the members sitting on the date of the vote, surnames first, like the records print them. For every row, give the number of the member it refers to. Printed names may be abbreviated or misspelled; if no member fits, use null.
 
 Return only a json object: {"records": [...]}, or {"records": []} if the page has no voting record. Each record is:
 {"kind": "electronic" | "manual",
  "title": "the vote's title as printed, or ''",
  "date": "DD/MM/YYYY as printed, or ''",
  "totals": {"si": int, "no": int},   // exactly as printed in the record's totals box or TOTAL row
- "rows": [{"n": int | null, "printed": "...", "member": "..." | null, "vote": "si" | "no"}]}
-"n" is the row number as printed (electronic records number every row). Include every row of every record on the page, in order.
+ "rows": [[row, member, "SURNAME", "si" | "no"], ...]}
+Each row is [the row number as printed (null for manual records), the MEMBERS number or null, the first surname exactly as printed on that row, the vote]. For a row whose member is null, add the full printed name as a fifth item. Include every row of every record on the page, in order.
 A record's rows can continue from the previous page without its title or totals: return those rows as a record with kind "electronic", title "" and totals {"si": 0, "no": 0}."""
 
 
@@ -288,18 +289,77 @@ def spanish_date(text):
     return None
 
 
-def members_on(legislators, day):
-    """Everyone who held a seat in the year up to `day`, one per line, for the
-    record prompt. `legislators` is the pipeline database with its legislators
-    tables, or None."""
+def fold(s):
+    return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+
+
+def session_day(pages):
+    """The session date from the acta header near the start of the gazette, as
+    '2025-12-03', or None."""
+    m = re.search(r"sesi[oó]n[^.]{0,80}?(\d{1,2}\s+de\s+\w+\s+de\s+\d{4})", "\n".join(pages[:5]), re.I)
+    return spanish_date(m.group(1)) if m else None
+
+
+def members_on(legislators, day, chamber="Cámara de Representantes"):
+    """Members of `chamber` sitting on `day`, sorted by surname, as dicts with
+    id, surnames and given names. `legislators` is the pipeline database with
+    its legislators tables, or None."""
     if legislators is None or day is None:
-        return ""
-    year_before = f"{int(day[:4]) - 1}{day[4:]}"
+        return []
     rows = legislators.execute(
-        """SELECT DISTINCT l.name, t.chamber FROM legislators l
-           JOIN legislator_terms t ON t.legislator_id = l.id
-           WHERE t.start_date <= ? AND t.end_date >= ? ORDER BY l.name""", (day, year_before)).fetchall()
-    return "\n".join(f"{name} ({chamber})" for name, chamber in rows)
+        """SELECT DISTINCT t.legislator_id, json_extract(t.raw_json, '$.apellidos'), json_extract(t.raw_json, '$.nombres')
+           FROM legislator_terms t WHERE t.chamber = ? AND t.start_date <= ? AND t.end_date >= ?""",
+        (chamber, day, day)).fetchall()
+    members = [{"id": i, "surnames": (a or "").strip(), "given": (n or "").strip()} for i, a, n in rows]
+    return sorted(members, key=lambda m: fold(m["surnames"] + " " + m["given"]))
+
+
+def members_text(members):
+    return "\n".join(f"{i}) {m['surnames'].upper()} {m['given']}" for i, m in enumerate(members, start=1))
+
+
+PARTICLES = {"de", "del", "la", "las", "los", "y"}
+
+
+def edit_distance(a, b):
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, start=1):
+        prev, row[0] = row[0], i
+        for j, y in enumerate(b, start=1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (x != y))
+    return row[-1]
+
+
+def surname_fits(printed, member):
+    """Whether the first surname printed on a row is the member's, allowing a
+    misread letter (two in longer names)."""
+    first = lambda s: next((t for t in re.findall(r"[a-z]+", fold(s).replace("-", "")) if t not in PARTICLES), "")
+    a, b = first(printed), first(member["surnames"])
+    return bool(a) and edit_distance(a, b) <= (1 if len(b) <= 6 else 2)
+
+
+def read_rows(record, members):
+    """Replace the model's rows, [row, member, surname, vote, printed name?],
+    with dicts: n, vote, name, legislator_id, and problem saying why the row
+    couldn't be tied to a member (None if it was, or if there is no list)."""
+    rows = []
+    for row in record.get("rows") or []:
+        if not isinstance(row, list) or len(row) < 4:
+            continue
+        n, number, surname, vote = row[:4]
+        printed = str(row[4] if len(row) > 4 and row[4] else surname or "").strip()
+        member = members[number - 1] if isinstance(number, int) and 1 <= number <= len(members) else None
+        problem = None
+        if members and member is None:
+            problem = f"no member found for {printed!r}"
+        elif member and not surname_fits(surname, member):
+            problem = f"member {number} is {member['surnames']}, but the row reads {surname!r}"
+            member = None
+        rows.append({"n": n if isinstance(n, int) else None, "vote": vote,
+                     "name": f"{member['surnames']} {member['given']}" if member else printed,
+                     "legislator_id": member["id"] if member else None, "problem": problem})
+    record["rows"] = rows
+    return record
 
 
 # ---------- LLM ----------
@@ -442,12 +502,14 @@ def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_R
     better reading. Pages only get here when they sit next to a House result, so
     "no records" is more likely a misreading than a real answer."""
     page = pymupdf.open(path)[page_no - 1]
-    user = f"GACETA: {json.dumps(meta, ensure_ascii=False)}\nPAGE: {page_no}\n\nMEMBERS:\n{members or '(not available)'}"
+    user = (f"GACETA: {json.dumps(meta, ensure_ascii=False)}\nPAGE: {page_no}\n\n"
+            f"MEMBERS:\n{members_text(members) or '(not available)'}")
     best = None
     try:
         for dpi in dpis:
             out = call_llm(RECORD_PROMPT, user, page.get_pixmap(dpi=dpi).tobytes("png"), VISION_MODEL)
-            records = [r for r in out.get("records", []) if isinstance(r, dict) and r.get("rows")]
+            records = [read_rows(r, members) for r in out.get("records", []) if isinstance(r, dict)]
+            records = [r for r in records if r["rows"]]
             for r in records:
                 r["kind"] = str(r.get("kind", "")).strip().lower()
             better = lambda a, b: (bool(a), -skipped_rows(a)) > (bool(b), -skipped_rows(b))
@@ -484,8 +546,20 @@ def vote_side(value):
 
 
 def record_names(record, side):
-    return [(row.get("member") or row.get("printed") or "").strip() for row in record.get("rows", [])
-            if vote_side(row.get("vote")) == side and (row.get("member") or row.get("printed"))]
+    return [row["name"] for row in record.get("rows", []) if vote_side(row["vote"]) == side and row["name"]]
+
+
+def check_members(parts):
+    """Problems tying the rows of a vote's records to members: rows with no
+    member or the wrong surname, and members listed twice."""
+    problems = [f"{r.get('kind')} record on page {r.get('page')} row {row['n'] or '?'}: {row['problem']}"
+                for r in parts for row in r["rows"] if row["problem"]]
+    ids = [row["legislator_id"] for r in parts for row in r["rows"] if row["legislator_id"] is not None]
+    twice = sorted({row["name"] for r in parts for row in r["rows"]
+                    if row["legislator_id"] is not None and ids.count(row["legislator_id"]) > 1})
+    if twice:
+        problems.append(f"listed more than once: {', '.join(twice)}")
+    return problems
 
 
 def check_record(record):
@@ -588,13 +662,15 @@ def attach_records(votes, records, pages=()):
                  and 0 <= e["page"] - page_of(v) <= 4]
         best = max(cands, default=None, key=lambda i: (
             bool(numbers(votes[i].get("bill_name")) & numbers(e.get("title"))), page_of(votes[i])))
-        problems = [p for p in map(check_record, parts) if p]
+        problems = [p for p in map(check_record, parts) if p] + check_members(parts)
         announced = house_result("\n".join(pages[max(0, e["page"] - 3):e["page"]]))
         if announced is None:
             problems.append("no announced result found in the text")
         problems += check_announced(e, parts[1] if len(parts) > 1 else None, announced)
         filled = {"yes": sum((record_names(r, "si") for r in parts), []),
                   "no": sum((record_names(r, "no") for r in parts), []), "abstain": [],
+                  "legislator_ids": {row["name"]: row["legislator_id"] for r in parts for row in r["rows"]
+                                     if row["legislator_id"] is not None},
                   "source": "record", "verified": int(not problems), "check_note": "; ".join(problems) or None}
         if best is not None:
             used_votes.add(best)
@@ -673,9 +749,11 @@ CREATE TABLE IF NOT EXISTS votes (
 
 CREATE TABLE IF NOT EXISTS vote_records (
     vote_id    INTEGER NOT NULL REFERENCES votes (id) ON DELETE CASCADE,
-    legislator TEXT NOT NULL,               -- name as written in the gazette; for records, the matching
-                                            -- name from the legislators list when the model found one
+    legislator TEXT NOT NULL,               -- name as written in the gazette; for records, the
+                                            -- member's name from the legislators list when matched
     vote       TEXT NOT NULL CHECK (vote IN ('yes', 'no', 'abstain')),
+    legislator_id INTEGER,                  -- legislators.id in the pipeline database, for records
+                                            -- read with --legislators whose row matched a member
     UNIQUE (vote_id, legislator, vote)
 );
 CREATE INDEX IF NOT EXISTS vote_records_legislator ON vote_records (legislator);
@@ -738,9 +816,11 @@ def open_db(path):
             ("documents", "record_pages_failed", "INTEGER NOT NULL DEFAULT 0"),
             ("votes", "source", "TEXT NOT NULL DEFAULT 'text'"),
             ("votes", "verified", "INTEGER"),
-            ("votes", "check_note", "TEXT")]:
+            ("votes", "check_note", "TEXT"),
+            ("vote_records", "legislator_id", "INTEGER")]:
         if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS vote_records_legislator_id ON vote_records (legislator_id)")
     return conn
 
 
@@ -776,8 +856,9 @@ def save_document(conn, doc, found):
             )
             saved += 1
             conn.executemany(
-                "INSERT OR IGNORE INTO vote_records (vote_id, legislator, vote) VALUES (?, ?, ?)",
-                [(cur.lastrowid, name, k) for k in ("yes", "no", "abstain") for name in names(v, k)],
+                "INSERT OR IGNORE INTO vote_records (vote_id, legislator, vote, legislator_id) VALUES (?, ?, ?, ?)",
+                [(cur.lastrowid, name, k, (v.get("legislator_ids") or {}).get(name))
+                 for k in ("yes", "no", "abstain") for name in names(v, k)],
             )
     return saved
 
@@ -812,7 +893,8 @@ def main():
         jobs += [(doc, meta, c) for c in chunks]
         for page_no in recs:
             m = RECORD_DATE.search(pages[page_no - 1])
-            day = f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else spanish_date(meta["publication_date"])
+            day = (f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else
+                   session_day(pages) or spanish_date(meta["publication_date"]))
             record_jobs.append((doc, meta, path, page_no, members_on(legislators, day)))
             doc["record_args"][page_no] = (meta, path, page_no, record_jobs[-1][4])
         print(f"{path}: {len(pages)} pages, {len(chunks)} chunks"
