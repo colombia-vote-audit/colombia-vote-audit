@@ -6,3 +6,7 @@ __pycache__/
 *.pdf
 *.PDF
 .env
+.DS_Store
+*.db
+*.db-wal
+*.db-shm

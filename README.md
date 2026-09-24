@@ -80,6 +80,22 @@ It writes these files to `data/sample/`:
 uv run cva sample-fetch samples/manifest.json
 ```
 
+## Linking votes to legislators
+
+`extract_votes.py` records each voter's name as the gazette prints it. To link those names to `legislators.id`:
+
+```sh
+uv run cva sync-legislators                  # if data/cva.db has no legislators yet
+uv run python -m cva.link votes.db           # fills vote_records.legislator_id
+```
+
+- The linker adds `legislator_id` and `legislator_match` (`exact`, `fuzzy`, `ambiguous` or `none`) to `vote_records`. Re-running it is safe.
+- A name is compared with everyone seated on the vote's date. Chamber is used only to break ties, because Congreso Visible lists some terms under the wrong chamber.
+- The rules for abbreviations, typos and missing middle names are in `cva.link`.
+- `data/cva.db` is opened read-only and the pipeline lock isn't taken, so the linker can run during a download.
+
+On the 116-gazette sample, 98% of records link (93% exact, 5% fuzzy), none are ambiguous, and 2% don't match. Most unmatched names belong to people Congreso Visible doesn't list.
+
 ## Deployment
 
 `flake.nix` exports `nixosModules.default`:
