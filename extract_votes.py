@@ -146,14 +146,26 @@ def page_text(page):
     """Page text with vote-table X marks labeled by column (SÍ / NO / ABST)."""
     words = page.get_text("words")  # x0, y0, x1, y1, text, block, line, word
     headers = [w for w in words if w[4].strip().upper() in COLUMN_HEADERS]
+    # Gazette pages have two text columns, and a vote table that starts in one can
+    # continue in the other without repeating its header row.
+    mid = page.rect.width / 2
+    center = lambda w: (w[0] + w[2]) / 2
+    column = lambda w: 0 if center(w) < mid else 1
+    left = {c: min((w[0] for w in words if column(w) == c), default=0) for c in (0, 1)}
     lines, out = {}, []
     for w in words:
         txt = w[4]
         if txt.upper() == "X" and headers:
-            cx = (w[0] + w[2]) / 2
-            above = [h for h in headers if h[1] < w[1]] or headers
-            # nearest header above by x; prefer closest vertically among ties
-            h = min(above, key=lambda h: (abs((h[0] + h[2]) / 2 - cx) // 8, w[1] - h[1]))
+            cx = center(w)
+            above = [h for h in headers if column(h) == column(w) and h[1] < w[1]]
+            if above:
+                # nearest header above by x; prefer closest vertically among ties
+                h = min(above, key=lambda h: (abs(center(h) - cx) // 8, w[1] - h[1]))
+            else:
+                # The table continues from the other column: compare positions
+                # measured from each column's left edge.
+                rel = cx - left[column(w)]
+                h = min(headers, key=lambda h: (abs(center(h) - left[column(h)] - rel) // 8, abs(w[1] - h[1])))
             txt = f"X[{h[4].strip().upper()}]"
         lines.setdefault((w[5], w[6]), []).append(txt)
     for key in sorted(lines):
