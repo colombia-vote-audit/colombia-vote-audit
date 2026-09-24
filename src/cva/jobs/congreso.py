@@ -1,4 +1,4 @@
-"""Sync bills, bill status timelines and votes from Congreso Visible."""
+"""Sync bills, bill status timelines, votes and legislators from Congreso Visible."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ import sqlite3
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from itertools import batched
+from urllib.parse import quote
 
 from cva.db import now
 from cva.gazette import parse_refs
-from cva.sources.congresovisible import CongresoVisible
+from cva.sources.congresovisible import UPLOADS, CongresoVisible
 
 log = logging.getLogger(__name__)
 
@@ -206,3 +207,74 @@ def _upsert_vote(conn: sqlite3.Connection, v: dict, ts: str, stats: Counter):
             ts,
         ),
     )
+
+
+def _term_rows(chamber: str, term: dict, members: list[dict]) -> list[dict]:
+    start = f"{term['fechaInicio']}-07-20"
+    end = f"{term['fechaFin']}-07-19"
+    return [
+        {
+            "persona_id": m["persona_id"],
+            "name": " ".join(filter(None, [m.get("nombres"), m.get("apellidos")])).strip(),
+            "photo_url": UPLOADS + quote(m["persona_imagen"]) if m.get("persona_imagen") else None,
+            "chamber": chamber,
+            "start_date": start,
+            "end_date": end,
+            "party": m.get("partido"),
+            "raw_json": json.dumps(m, ensure_ascii=False),
+        }
+        for m in members
+    ]
+
+
+def sync_legislators(conn: sqlite3.Connection, cv: CongresoVisible) -> dict:
+    ts = now()
+    rows = []
+    for chamber in cv.chambers():
+        for term in cv.terms():
+            members = list(cv.iter_legislators(chamber["id"], term["id"]))
+            rows += _term_rows(chamber["nombre"], term, members)
+    stats = store_legislators(conn, rows, ts)
+    log.info("legislators: %s", stats)
+    return stats
+
+
+def store_legislators(conn: sqlite3.Connection, rows: list[dict], ts: str) -> dict:
+    with conn:
+        before = conn.execute("SELECT count(*) FROM legislators").fetchone()[0]
+        # Name and photo are refreshed from the listing on every sync.
+        conn.executemany(
+            """
+            INSERT INTO legislators (id, name, photo_url)
+            VALUES (:persona_id, :name, :photo_url)
+            ON CONFLICT (id) DO UPDATE SET
+                name = excluded.name,
+                photo_url = coalesce(excluded.photo_url, legislators.photo_url)
+            """,
+            rows,
+        )
+        conn.executemany(
+            """
+            INSERT INTO legislator_terms (legislator_id, chamber, start_date, end_date,
+                                          party, raw_json, last_seen_at)
+            VALUES (:persona_id, :chamber, :start_date, :end_date, :party, :raw_json, :ts)
+            ON CONFLICT (legislator_id, chamber, start_date) DO UPDATE SET
+                end_date = excluded.end_date, party = excluded.party,
+                raw_json = excluded.raw_json, last_seen_at = excluded.last_seen_at
+            """,
+            [{**r, "ts": ts} for r in rows],
+        )
+        conn.execute(
+            """
+            UPDATE legislators SET
+                start_date = (SELECT min(start_date) FROM legislator_terms t
+                              WHERE t.legislator_id = legislators.id),
+                end_date = (SELECT max(end_date) FROM legislator_terms t
+                            WHERE t.legislator_id = legislators.id),
+                party = (SELECT party FROM legislator_terms t
+                         WHERE t.legislator_id = legislators.id
+                         ORDER BY start_date DESC, chamber LIMIT 1)
+            """
+        )
+        after = conn.execute("SELECT count(*) FROM legislators").fetchone()[0]
+    return {"terms": len(rows), "legislators": after, "new": after - before}

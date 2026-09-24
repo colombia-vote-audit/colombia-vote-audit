@@ -113,6 +113,35 @@ MIGRATIONS = [
         stats_json  TEXT
     );
     """,
+    """
+    -- One row per person. id is Congreso Visible's persona id, so it is
+    -- stable across re-syncs; it is what vote data should reference.
+    -- start_date/end_date span all terms and party is the party of the
+    -- latest term; per-term detail is in legislator_terms.
+    CREATE TABLE legislators (
+        id             INTEGER PRIMARY KEY,
+        name           TEXT NOT NULL,            -- given names then surnames
+        start_date     TEXT,
+        end_date       TEXT,
+        party          TEXT,
+        photo_url      TEXT
+    );
+
+    -- One row per (legislator, chamber, four-year term). Dates are the
+    -- term's constitutional dates (20 July to 19 July), not the dates a
+    -- replacement actually sat.
+    CREATE TABLE legislator_terms (
+        legislator_id  INTEGER NOT NULL REFERENCES legislators (id),
+        chamber        TEXT NOT NULL,  -- same values as gazettes.chamber
+        start_date     TEXT NOT NULL,
+        end_date       TEXT NOT NULL,
+        party          TEXT,
+        raw_json       TEXT NOT NULL,
+        last_seen_at   TEXT NOT NULL,
+        PRIMARY KEY (legislator_id, chamber, start_date)
+    );
+    CREATE INDEX legislator_terms_dates ON legislator_terms (chamber, start_date, end_date);
+    """,
 ]
 
 

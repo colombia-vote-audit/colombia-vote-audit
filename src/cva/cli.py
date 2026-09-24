@@ -121,12 +121,18 @@ def cmd_sync_votes(ctx: Context, args):
         stats.update(congreso.sync_votes(ctx.conn, ctx.congreso()))
 
 
+def cmd_sync_legislators(ctx: Context, args):
+    with ctx.run("sync-legislators") as stats:
+        stats.update(congreso.sync_legislators(ctx.conn, ctx.congreso()))
+
+
 def cmd_daily(ctx: Context, args):
     """Everything the scheduled job does, in order. One failing step
     doesn't stop the others."""
     steps = [
         ("sync-bills", lambda: cmd_sync_bills(ctx, argparse.Namespace(details=args.bill_details))),
         ("sync-votes", lambda: cmd_sync_votes(ctx, args)),
+        ("sync-legislators", lambda: cmd_sync_legislators(ctx, args)),
         (
             "fetch-gazettes",
             lambda: cmd_fetch_gazettes(
@@ -166,6 +172,8 @@ def cmd_status(ctx: Context, args):
     print(f"bills: {bills[0]} indexed, {bills[1]} with detail, {bills[2]} final")
     votes = q("SELECT count(*), sum(has_roll_call) FROM votes").fetchone()
     print(f"votes: {votes[0]} ({votes[1]} with roll-call text)")
+    legs = q("SELECT count(*), (SELECT count(*) FROM legislator_terms) FROM legislators").fetchone()
+    print(f"legislators: {legs[0]} ({legs[1]} terms)")
     print("recent runs:")
     for r in q("SELECT job, started_at, status, stats_json FROM runs ORDER BY id DESC LIMIT 8"):
         print(f"  {r[1]}  {r[0]:15} {r[2]:7} {r[3]}")
@@ -262,7 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_sync_votes
     )
 
-    s = sub.add_parser("daily", help="scheduled run: bills, votes, gazettes")
+    sub.add_parser(
+        "sync-legislators", help="refresh Congreso Visible legislators and their terms"
+    ).set_defaults(func=cmd_sync_legislators)
+
+    s = sub.add_parser("daily", help="scheduled run: bills, votes, legislators, gazettes")
     s.add_argument("--bill-details", type=int, default=2000)
     add_fetch_args(s)
     s.set_defaults(func=cmd_daily, max_minutes=600)

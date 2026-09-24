@@ -12,6 +12,7 @@ Fetch pipeline for Colombian congressional voting records.
 
 **Congreso Visible** (`apicongresovisible.uniandes.edu.co`, Universidad de los Andes)
 - Bills back to 1998. Each bill's status timeline cites gazettes as `number/yy`; these are parsed into `bill_state_gazettes`.
+- Legislators of both chambers for every term from 1998–2002 on (`cva sync-legislators`). `legislators` has one row per person. Its `id` is Congreso Visible's `persona_id`, so it stays the same across syncs, and it is the key that vote data should reference. `legislator_terms` holds each chamber, term and party. Term dates are the constitutional ones (20 July to 19 July), so a replacement who sat for only part of a term is listed as serving the whole term.
 - Votes, including per-legislator roll calls for ~5.3k votes (mostly 2011–2018) in `datos_importacion`.
 - The API is undocumented; the endpoints are listed in `cva.sources.congresovisible`.
 
@@ -27,6 +28,7 @@ uv run cva sync-gazettes             # Imprenta index, ~10 s
 uv run cva fetch-gazettes            # download every pending PDF, session records first
 uv run cva sync-bills --details 100  # bill index + up to 100 bill timelines
 uv run cva sync-votes                # Congreso Visible votes, ~1 min
+uv run cva sync-legislators          # legislators and their terms, ~20 s
 uv run cva status
 uv run cva daily                     # what the scheduled job runs
 ```
@@ -90,4 +92,4 @@ services.cva-pipeline = {
 };
 ```
 
-This runs `cva daily` every night: votes, bills (up to 2000 bill details per run) and then PDFs, with a 10-hour download budget. The first run downloads most of the archive, and later runs pick up the ~5–10 new gazettes a day.
+This runs `cva daily` every night: votes, bills (up to 2000 bill details per run), legislators and then PDFs, with a 10-hour download budget. The first run downloads most of the archive, and later runs pick up the ~5–10 new gazettes a day.

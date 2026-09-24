@@ -69,3 +69,45 @@ def test_detail_refresh_policy():
             (iso(fetched), final, bid),
         )
     assert congreso.select_detail_due(conn, None, at=at) == [1, 5, 2]
+
+
+def member(persona_id, party, apellidos="Pérez Gómez"):
+    return {
+        "persona_id": persona_id,
+        "nombres": "Ana María",
+        "apellidos": apellidos,
+        "persona_imagen": f"persona/{persona_id}/figura-95px.jpg",
+        "partido": party,
+    }
+
+
+def test_legislator_spans_terms_and_resync_is_idempotent():
+    conn = db.connect(":memory:")
+    t1 = {"fechaInicio": 2014, "fechaFin": 2018}
+    t2 = {"fechaInicio": 2018, "fechaFin": 2022}
+    senado, camara = "Senado de la República", "Cámara de Representantes"
+    congreso.store_legislators(
+        conn,
+        congreso._term_rows(camara, t1, [member(7, "Liberal"), member(9, "Verde", "Ruiz")])
+        + congreso._term_rows(senado, t2, [member(7, "Conservador")]),
+        db.now(),
+    )
+    leg = conn.execute("SELECT * FROM legislators WHERE id = 7").fetchone()
+    assert leg["name"] == "Ana María Pérez Gómez"
+    assert (leg["start_date"], leg["end_date"], leg["party"]) == (
+        "2014-07-20",
+        "2022-07-19",
+        "Conservador",
+    )
+    assert leg["photo_url"].endswith("/uploads/persona/7/figura-95px.jpg")
+    assert (
+        conn.execute("SELECT count(*) FROM legislator_terms WHERE legislator_id = 7").fetchone()[0]
+        == 2
+    )
+
+    # Re-syncing a term updates rows instead of adding people or terms.
+    stats = congreso.store_legislators(
+        conn, congreso._term_rows(camara, t1, [member(7, "Liberal")]), db.now()
+    )
+    assert stats["new"] == 0
+    assert conn.execute("SELECT count(*) FROM legislator_terms").fetchone()[0] == 3
