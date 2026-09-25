@@ -594,14 +594,28 @@ def check_members(parts):
             for r in parts for row in r["rows"] if row["problem"]]
 
 
+def twice_in(rows):
+    """Names of members tied to more than one of `rows`."""
+    ids = [row["legislator_id"] for row in rows if row["legislator_id"] is not None]
+    return sorted({row["name"] for row in rows if row["legislator_id"] is not None
+                   and ids.count(row["legislator_id"]) > 1})
+
+
+def check_repeats(parts):
+    """Members a single record lists twice. A record never does: the model
+    gave some row the number of a member who has a row of their own, and
+    whoever that row was is missing."""
+    return [f"{r.get('kind')} record on {record_pages_text(r)} lists {name} twice"
+            for r in parts for name in twice_in(r["rows"])]
+
+
 def listed_twice(parts):
-    """A note naming members who appear more than once in a vote's records. The
-    records themselves can do this: a member who votes electronically and by
-    hand is printed in both, sometimes on opposite sides."""
-    ids = [row["legislator_id"] for r in parts for row in r["rows"] if row["legislator_id"] is not None]
-    twice = sorted({row["name"] for r in parts for row in r["rows"]
-                    if row["legislator_id"] is not None and ids.count(row["legislator_id"]) > 1})
-    return [f"listed more than once: {', '.join(twice)}"] if twice else []
+    """A note naming members who appear in both of a vote's records. The
+    records themselves do this: a member who votes electronically and by hand
+    is printed in both, sometimes on opposite sides."""
+    both = sorted(set(twice_in([row for r in parts for row in r["rows"]]))
+                  - {name for r in parts for name in twice_in(r["rows"])})
+    return [f"listed in both records: {', '.join(both)}"] if both else []
 
 
 def check_row_numbers(record):
@@ -767,7 +781,7 @@ def attach_records(votes, records, pages=()):
         best = max(cands, default=None, key=lambda i: (
             bool(bill_ids(votes[i].get("bill_name")) & bill_ids(e["title"])), page_of(votes[i])))
         problems = ([p for p in [*map(check_record, parts), check_row_numbers(e)] if p]
-                    + e.get("stray", []) + check_members(parts))
+                    + e.get("stray", []) + check_members(parts) + check_repeats(parts))
         # The announced result is only a note: the secretary sometimes misstates
         # it and corrects it later in a "nota aclaratoria", while the records
         # come from the voting system.
