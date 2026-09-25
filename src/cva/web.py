@@ -46,16 +46,9 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from cva.gazette import publication_date
 from cva.store import BlobStore
 
-MONTHS = {
-    m: i + 1
-    for i, m in enumerate(
-        "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre"
-        " diciembre".split()
-    )
-}
-MONTHS["setiembre"] = 9
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 REQUIRED_TABLES = {
     "legislators",
@@ -75,14 +68,6 @@ def fold(s: str | None) -> str:
 def iso_date(s: str | None) -> str | None:
     s = (s or "").strip()
     return s if ISO_DATE.fullmatch(s) else None
-
-
-def publication_date(s: str | None) -> str | None:
-    """'25 de septiembre de 2025' -> '2025-09-25'."""
-    m = re.fullmatch(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", (s or "").strip(), re.I)
-    if not m or m[2].lower() not in MONTHS:
-        return None
-    return f"{m[3]}-{MONTHS[m[2].lower()]:02d}-{int(m[1]):02d}"
 
 
 def chamber_matches(short: str, full: str) -> bool:

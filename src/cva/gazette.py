@@ -9,6 +9,15 @@ from __future__ import annotations
 
 import re
 
+MONTHS = {
+    m: i + 1
+    for i, m in enumerate(
+        "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre"
+        " diciembre".split()
+    )
+}
+MONTHS["setiembre"] = 9
+
 _REF = re.compile(r"(\d{1,4}[A-Za-z]?)\s*/\s*(\d{2}(?:\d{2})?)\b")
 
 
@@ -35,3 +44,11 @@ def parse_refs(text: str | None) -> list[tuple[int, str]]:
         if ref not in seen:
             seen.append(ref)
     return seen
+
+
+def publication_date(s: str | None) -> str | None:
+    """A gazette's printed date as ISO: '25 de septiembre de 2025' -> '2025-09-25'."""
+    m = re.fullmatch(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", (s or "").strip(), re.I)
+    if not m or m[2].lower() not in MONTHS:
+        return None
+    return f"{m[3]}-{MONTHS[m[2].lower()]:02d}-{int(m[1]):02d}"
