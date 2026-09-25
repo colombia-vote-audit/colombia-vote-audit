@@ -83,6 +83,22 @@ const en = {
   downloadNote: (gz: string, db: string) =>
     `SQLite, gzipped: ${gz} MB (${db} MB unpacked). Every vote, name and check behind this site, plus the committee votes it leaves out.`,
   error: (m: string) => `Couldn't load: ${m}`,
+  comments: {
+    title: "Notes and sources",
+    intro:
+      "Data, reporting and links about this legislator, posted by organizations and groups. Posts are not checked by this site.",
+    organization: "Organization or group",
+    organizationPlaceholder: "e.g. Misión de Observación Electoral",
+    author: "Your name (optional)",
+    body: "Comment",
+    bodyPlaceholder: "Share data or a link about this legislator…",
+    post: "Post",
+    posting: "Posting…",
+    none: "No posts yet.",
+    by: (a: string) => `by ${a}`,
+    tooLong: (n: number) => `${n} characters over the limit`,
+    failed: (m: string) => `Couldn't post: ${m}`,
+  },
   bc: {
     nav: "Barcode",
     title: "The House barcode",
@@ -251,6 +267,22 @@ const es: Dict = {
   downloadNote: (gz, db) =>
     `SQLite comprimido con gzip: ${gz} MB (${db} MB descomprimido). Todas las votaciones, nombres y verificaciones de este sitio, más las votaciones de comisión que no muestra.`,
   error: (m) => `No se pudo cargar: ${m}`,
+  comments: {
+    title: "Notas y fuentes",
+    intro:
+      "Datos, reportajes y enlaces sobre este congresista, publicados por organizaciones y grupos. Este sitio no verifica las publicaciones.",
+    organization: "Organización o grupo",
+    organizationPlaceholder: "p. ej. Misión de Observación Electoral",
+    author: "Su nombre (opcional)",
+    body: "Comentario",
+    bodyPlaceholder: "Comparta datos o un enlace sobre este congresista…",
+    post: "Publicar",
+    posting: "Publicando…",
+    none: "Aún no hay publicaciones.",
+    by: (a) => `por ${a}`,
+    tooLong: (n) => `${n} caracteres por encima del límite`,
+    failed: (m) => `No se pudo publicar: ${m}`,
+  },
   bc: {
     nav: "Código de barras",
     title: "El código de barras de la Cámara",
@@ -349,6 +381,7 @@ interface I18n {
   t: Dict;
   num: (n: number) => string;
   longDate: (iso: string) => string;
+  dateTime: (iso: string) => string;
 }
 
 const Ctx = createContext<I18n | null>(null);
@@ -372,6 +405,14 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     num: (n) => n.toLocaleString(locale),
     longDate: (iso) =>
       new Date(`${iso}T12:00:00`).toLocaleDateString(locale, { day: "numeric", month: "short", year: "numeric" }),
+    dateTime: (iso) =>
+      new Date(iso).toLocaleString(locale, {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }),
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

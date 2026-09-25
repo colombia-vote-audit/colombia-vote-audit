@@ -1,10 +1,11 @@
-"""Read-only web API over a votes database, and the site that uses it.
+"""Web API over a votes database, and the site that uses it.
 
     uv run python -m cva.web votes.db [--pdfs data/pdfs] [--static web/dist]
 
 The votes database is the one written by extract_votes.py, after
-cva.attendance has added the legislator tables. It is opened read-only.
-Committee votes (is_committee = 1) are left out everywhere; votes with no
+cva.attendance has added the legislator tables. It is only read, apart from
+the comments posted on legislators' pages (cva.comments), which are saved in
+it. Committee votes (is_committee = 1) are left out everywhere; votes with no
 committee flag are kept.
 
 Every vote gets a date for sorting and filtering: its own session date, else
@@ -22,6 +23,8 @@ Endpoints:
     GET /api/votes/{id}
     GET /api/legislators?q=
     GET /api/legislators/{id}
+    GET /api/legislators/{id}/comments      notes and links posted about them (cva.comments)
+    POST /api/legislators/{id}/comments     {organization, author, body}: post one
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
     GET /download-db            the votes database itself, gzipped, for anyone to use
     GET /api/barcode            every House member's ballot on every checked roll call
@@ -36,7 +39,8 @@ seconds, since every one is paid for.
 
 Built frontend files under /assets/ have content hashes in their names and
 are cached for a year; API answers (GET) for five minutes, since they only
-change on a restart; index.html is revalidated on every load, so deploys show up.
+change on a restart, except comments, which aren't cached; index.html is
+revalidated on every load, so deploys show up.
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from cva import ask as asking
+from cva import comments as commenting
 from cva.barcode import Grid
 from cva.gazette import publication_date
 from cva.store import BlobStore
@@ -212,6 +217,8 @@ def cache_policy(path: str) -> str:
         return "public, max-age=31536000, immutable"
     if path.startswith("/pdf/"):
         return "public, max-age=86400"
+    if path.startswith("/api/") and path.endswith("/comments"):
+        return "no-store"
     if path.startswith("/api/"):
         return "public, max-age=300"
     return "no-cache"
@@ -282,9 +289,12 @@ def create_app(
     pdfs: Path | None = None,
     static: Path | None = None,
     llm: asking.Complete | None = None,
+    preview=commenting.fetch_preview,
 ):
-    """`llm` answers the question box; without it the box is off."""
+    """`llm` answers the question box; without it the box is off. `preview`
+    fetches a link's preview for comments."""
     data = Data(votes_db)
+    commenting.setup(votes_db)
     barcode_json = json.dumps(
         {**data.grid.payload(), "ask": llm is not None}, ensure_ascii=False, separators=(",", ":")
     ).encode()
@@ -456,6 +466,49 @@ def create_app(
             }
         )
 
+    def comments(request: Request):
+        lid = request.path_params["id"]
+        if lid not in data.legislators:
+            raise HTTPException(404, "no such legislator")
+        conn = data.connect()
+        try:
+            return JSONResponse({"comments": commenting.listing(conn, lid)})
+        finally:
+            conn.close()
+
+    async def post_comment(request: Request):
+        lid = request.path_params["id"]
+        if lid not in data.legislators:
+            raise HTTPException(404, "no such legislator")
+        try:
+            got = await request.json()
+            org = " ".join(str(got["organization"]).split())
+            author = " ".join(str(got.get("author") or "").split()) or None
+            body = str(got["body"]).strip()
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise HTTPException(400, "send {organization, author, body}") from None
+        if not org or not body:
+            raise HTTPException(400, "a comment needs an organization and some text")
+        if len(org) > commenting.MAX_NAME or len(author or "") > commenting.MAX_NAME:
+            raise HTTPException(400, f"keep names under {commenting.MAX_NAME} characters")
+        if len(body) > commenting.MAX_BODY:
+            raise HTTPException(400, f"keep comments under {commenting.MAX_BODY} characters")
+        conn = sqlite3.connect(votes_db, timeout=15)
+        try:
+            urls = commenting.links(body)[: commenting.MAX_LINKS]
+            if urls:
+                await commenting.previews_for(conn, urls, preview)
+            cid = conn.execute(
+                "INSERT INTO comments (legislator_id, organization, author, body, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (lid, org, author, body, commenting.now()),
+            ).lastrowid
+            conn.commit()
+            posted = next(c for c in commenting.listing(conn, lid) if c["id"] == cid)
+        finally:
+            conn.close()
+        return JSONResponse(posted, status_code=201)
+
     def pdf(request: Request):
         doc = request.path_params["id"]
         conn = data.connect()
@@ -524,6 +577,8 @@ def create_app(
         Route("/api/votes/{id:int}", vote),
         Route("/api/legislators", legislators),
         Route("/api/legislators/{id:int}", legislator),
+        Route("/api/legislators/{id:int}/comments", comments),
+        Route("/api/legislators/{id:int}/comments", post_comment, methods=["POST"]),
         Route("/pdf/{id:int}", pdf),
         Route("/download-db", download_db),
         Route("/api/barcode", barcode),

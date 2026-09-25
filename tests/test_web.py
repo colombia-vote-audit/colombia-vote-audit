@@ -273,3 +273,59 @@ def test_a_failing_model_is_a_502(votes_db):
     client = TestClient(web.create_app(votes_db, llm=model))
     r = client.post("/api/ask", json={"turns": [{"role": "user", "content": "hola"}]})
     assert r.status_code == 502 and "try again" in r.json()["error"]
+
+
+def test_comments_are_posted_with_link_previews_and_not_cached(votes_db):
+    fetched = []
+
+    async def preview(url):
+        fetched.append(url)
+        if "broken" in url:
+            return {"title": None, "description": None, "site_name": None, "image": None}
+        return {"title": "Una nota", "description": "Texto", "site_name": "Diario", "image": None}
+
+    client = TestClient(web.create_app(votes_db, preview=preview))
+    assert client.get("/api/legislators/1/comments").json() == {"comments": []}
+    body = "Ver https://example.org/nota. y (https://broken.example/x)"
+    r = client.post(
+        "/api/legislators/1/comments",
+        json={"organization": "  Veeduría   Ciudadana ", "author": "", "body": body},
+    )
+    assert r.status_code == 201
+    assert r.json()["organization"] == "Veeduría Ciudadana" and r.json()["author"] is None
+    assert r.json()["previews"] == [
+        {
+            "url": "https://example.org/nota",
+            "title": "Una nota",
+            "description": "Texto",
+            "site_name": "Diario",
+            "image": None,
+        }
+    ]
+    client.post(
+        "/api/legislators/1/comments",
+        json={"organization": "Otra", "author": "Ana", "body": "https://example.org/nota"},
+    )
+    assert fetched == ["https://example.org/nota", "https://broken.example/x"]
+    got = client.get("/api/legislators/1/comments")
+    assert got.headers["cache-control"] == "no-store"
+    assert [(c["organization"], len(c["previews"])) for c in got.json()["comments"]] == [
+        ("Otra", 1),
+        ("Veeduría Ciudadana", 1),
+    ]
+    assert client.get("/api/legislators/2/comments").json() == {"comments": []}
+
+
+def test_bad_comments_are_refused(client):
+    bad = [
+        {"organization": "", "body": "hola"},
+        {"organization": "Grupo", "body": "  "},
+        {"organization": "Grupo", "body": "x" * 4001},
+        {"organization": "x" * 121, "body": "hola"},
+        {"body": "hola"},
+    ]
+    assert [client.post("/api/legislators/1/comments", json=b).status_code for b in bad] == [
+        400
+    ] * 5
+    assert client.post("/api/legislators/99/comments", json=bad[0]).status_code == 404
+    assert client.get("/api/legislators/99/comments").status_code == 404

@@ -106,7 +106,7 @@ Limits:
 
 ## Website
 
-A read-only site for browsing votes and legislators, as a Python API (`cva.web`) and a React frontend in `web/`. It reads a votes database after the attendance stage has run on it. Committee votes are left out.
+A site for browsing votes and legislators, as a Python API (`cva.web`) and a React frontend in `web/`. It reads a votes database after the attendance stage has run on it. Committee votes are left out.
 
 ```sh
 cd web && npm ci && npm run build && cd ..
@@ -115,6 +115,7 @@ uv run python -m cva.web votes.db --pdfs data/pdfs --static web/dist   # http://
 
 - `--pdfs` points at the pipeline's PDF store. Each vote then links to its page in the gazette PDF.
 - `/download-db` serves the votes database itself, gzipped (about 14 MB for 69 MB), committee votes included, so anyone can work with the data. The site links to it in its footer. The server writes the gzip copy next to the database on startup, when it's missing or older than the database.
+- Each legislator's page has a comment section: anyone can post notes and links under the name of an organization or group. Comments are saved in the votes database itself (tables `comments` and `link_previews`, from `cva.comments`), so replacing the database loses them and `/download-db` includes them. When a comment is posted, the server fetches a preview (title, description, image) of its first three links. It refuses to fetch from private addresses.
 - The API holds every vote's summary in memory. Restart it after the votes database is rebuilt.
 - A vote with no session date takes the date of the other votes in its gazette, else the gazette's publication date. The site marks these dates.
 - For frontend work, run the API as above and `npm run dev` in `web/`. Vite forwards `/api` and `/pdf` to port 8000.

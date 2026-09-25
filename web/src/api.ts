@@ -68,6 +68,24 @@ export interface LegislatorDetail extends LegislatorSummary {
   record: (VoteSummary & { position: Position; in_session: boolean | null; party_then: string | null })[];
 }
 
+// Comments on a legislator's page (cva.comments).
+export interface LinkPreview {
+  url: string;
+  title: string | null;
+  description: string | null;
+  site_name: string | null;
+  image: string | null;
+}
+
+export interface Comment {
+  id: number;
+  organization: string;
+  author: string | null;
+  body: string;
+  created_at: string; // UTC, ISO 8601
+  previews: LinkPreview[];
+}
+
 export interface Stats {
   votes: number;
   records: number;
@@ -147,6 +165,9 @@ export const api = {
   vote: (id: number) => get<VoteDetail>(`/api/votes/${id}`),
   legislators: (q?: string) => get<{ total: number; legislators: LegislatorSummary[] }>("/api/legislators", { q }),
   legislator: (id: number) => get<LegislatorDetail>(`/api/legislators/${id}`),
+  comments: (id: number) => get<{ comments: Comment[] }>(`/api/legislators/${id}/comments`),
+  postComment: (id: number, body: { organization: string; author: string; body: string }) =>
+    post<Comment>(`/api/legislators/${id}/comments`, body),
   barcode: () => get<BarcodeData>("/api/barcode"),
   ask: (body: { turns: Turn[]; view: unknown; lang: string }) => post<AskReply>("/api/ask", body),
 };

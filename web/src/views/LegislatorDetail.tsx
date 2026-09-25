@@ -14,6 +14,7 @@ import {
 } from "../common";
 import { useI18n } from "../i18n";
 import { href } from "../router";
+import { Comments } from "./Comments";
 
 const PAGE = 100;
 
@@ -138,6 +139,7 @@ function Body({ p }: { p: Legislator }) {
           {t.showMore}
         </button>
       )}
+      <Comments legislatorId={p.id} />
     </>
   );
 }
