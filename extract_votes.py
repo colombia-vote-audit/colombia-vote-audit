@@ -992,7 +992,8 @@ CREATE TABLE IF NOT EXISTS votes (
                                            'impedimento', 'procedural')),  -- NULL if the model gave none
     page         INTEGER,                   -- gazette page where the vote begins, as reported by the model
     is_committee INTEGER CHECK (is_committee IN (0, 1)),  -- 1 committee, 0 plenary, from the gazette's
-                                            -- front page; NULL if it says neither. Records are plenary.
+                                            -- front page; NULL if it says neither, except that records
+                                            -- are then taken as plenary
     source       TEXT NOT NULL DEFAULT 'text' CHECK (source IN ('text', 'record')),
                                             -- where the names come from: the text, or scanned voting records
     verified     INTEGER,                   -- records only: 1 if the rows match the printed totals, are
@@ -1079,6 +1080,33 @@ def open_db(path):
     return conn
 
 
+def committee_flag(banner, source):
+    """votes.is_committee: the gazette's front-page banner. Committees publish
+    scanned voting records too, so records follow the banner like text votes;
+    only in a gazette without one are they taken as plenary, where most are."""
+    return 0 if banner is None and source == "record" else banner
+
+
+def refresh_committee(conn, paths):
+    """Set is_committee again for the votes of already processed PDFs, from
+    their front pages, without calling the model. Returns how many changed."""
+    changed = 0
+    with conn:
+        for path in paths:
+            with open(path, "rb") as f:
+                sha256 = hashlib.sha256(f.read()).hexdigest()
+            with pymupdf.open(path) as pdf:
+                banner = committee_banner(page_text(pdf[0]) if len(pdf) else "")
+            for vid, source, old in conn.execute(
+                    "SELECT v.id, v.source, v.is_committee FROM votes v"
+                    " JOIN documents d ON d.id = v.document_id WHERE d.sha256 = ?", (sha256,)).fetchall():
+                new = committee_flag(banner, source)
+                if new != old:
+                    conn.execute("UPDATE votes SET is_committee = ? WHERE id = ?", (new, vid))
+                    changed += 1
+    return changed
+
+
 def save_document(conn, doc, found):
     """Replace everything stored for this PDF with the votes in `found`.
     Returns the number of votes saved."""
@@ -1106,7 +1134,7 @@ def save_document(conn, doc, found):
                            ("session_date", "acta", "bill_name", "bill_title", "subject", "description")),
                  v.get("result") if v.get("result") in RESULTS else "unknown",
                  v.get("vote_type") if v.get("vote_type") in VOTE_TYPES else None,
-                 page_of(v), 0 if v.get("source") == "record" else doc.get("is_committee"),
+                 page_of(v), committee_flag(doc.get("is_committee"), v.get("source", "text")),
                  v.get("source", "text"), v.get("verified"), v.get("check_note"),
                  json.dumps(v, ensure_ascii=False)),
             )
@@ -1137,7 +1165,14 @@ def main():
     ap.add_argument("--db", default="votes.db", help="SQLite database to write (created if missing)")
     ap.add_argument("--legislators", help="pipeline database with the legislators tables (cva.db); "
                     "lets the model name members exactly when reading scanned voting records")
+    ap.add_argument("--refresh-committee", action="store_true",
+                    help="only set is_committee again for these already processed PDFs, from their "
+                    "front pages; calls no model")
     args = ap.parse_args()
+    if args.refresh_committee:
+        changed = refresh_committee(open_db(args.db), args.pdfs)
+        print(f"is_committee changed on {changed} votes in {args.db}", file=sys.stderr)
+        return
     if "LLM_API_KEY" not in os.environ:
         sys.exit("Set LLM_API_KEY")
 
