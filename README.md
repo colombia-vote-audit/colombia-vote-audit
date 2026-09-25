@@ -88,8 +88,9 @@ After extraction, a second stage works out each legislator's time in office and 
 uv run python -m cva.attendance votes.db   # reads data/cva.db read-only; --cva to change
 ```
 
-It adds four tables to the votes database and rebuilds them on every run:
+It adds five tables to the votes database and rebuilds them on every run:
 - `legislators`: the name and `photo_url` of every legislator the votes refer to, copied from the pipeline database. `photo_url` is a link to the image on Congreso Visible's server, for the frontend to use directly in an `<img>` tag. It is NULL when Congreso Visible has no photo.
+- `legislator_terms`: those legislators' chambers, terms and parties, copied from the pipeline database.
 - `legislator_service`: each legislator's time in office per chamber and term, from their first recorded vote to their last. A replacement's window starts when they begin voting, and the window of the member they replaced ends at that member's last vote.
 - `vote_absences`: for each verified plenary vote, the legislators whose window covers the vote's date but who aren't on its record.
 - `vote_attendance`: for each of those votes, the date used and where it came from, and how many legislators were eligible, voted and were absent.

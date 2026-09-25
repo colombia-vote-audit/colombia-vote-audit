@@ -2,12 +2,14 @@
 
     uv run python -m cva.attendance votes.db [--cva data/cva.db]
 
-Reads a votes database written by extract_votes.py and adds four tables to
+Reads a votes database written by extract_votes.py and adds five tables to
 it, rebuilt from scratch on every run:
 
 - legislators: name and photo link for every legislator the votes refer to,
   copied from the pipeline database. photo_url points at Congreso Visible's
   server and is NULL when it has no photo.
+- legislator_terms: those legislators' chambers, terms and parties, copied
+  from the pipeline database.
 - legislator_service: each legislator's time in office per chamber and term,
   taken as the span from their first to their last recorded vote. Replacements,
   resignations and suspensions show up as windows that start late or end early.
@@ -28,8 +30,8 @@ A vote without a session date takes the date of the other votes in its gazette
 when they all share one (a House plenary acta records a single session);
 otherwise it is skipped.
 
-The pipeline database is opened read-only, for term dates, names and
-photo links only.
+The pipeline database is opened read-only, for terms, names and photo links
+only.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from collections import defaultdict
 
 SCHEMA = """
 DROP TABLE IF EXISTS legislators;
+DROP TABLE IF EXISTS legislator_terms;
 DROP TABLE IF EXISTS legislator_service;
 DROP TABLE IF EXISTS vote_absences;
 DROP TABLE IF EXISTS vote_attendance;
@@ -48,6 +51,15 @@ CREATE TABLE legislators (
     id            INTEGER PRIMARY KEY,  -- legislators.id in the pipeline database
     name          TEXT NOT NULL,
     photo_url     TEXT                  -- image on Congreso Visible's server; NULL if none
+);
+
+CREATE TABLE legislator_terms (
+    legislator_id INTEGER NOT NULL,
+    chamber       TEXT NOT NULL,      -- as in the pipeline database, e.g. 'Senado de la República'
+    start_date    TEXT NOT NULL,      -- constitutional term dates, 20 July to 19 July
+    end_date      TEXT NOT NULL,
+    party         TEXT,
+    PRIMARY KEY (legislator_id, chamber, start_date)
 );
 
 CREATE TABLE legislator_service (
@@ -168,6 +180,17 @@ def build(votes: sqlite3.Connection, cva: sqlite3.Connection) -> dict:
         referenced = {lid for lids in voters.values() for lid in lids}
         legislators = [(lid, *people[lid]) for lid in sorted(referenced) if lid in people]
         votes.executemany("INSERT INTO legislators VALUES (?, ?, ?)", legislators)
+        votes.executemany(
+            "INSERT INTO legislator_terms VALUES (?, ?, ?, ?, ?)",
+            [
+                row
+                for row in cva.execute(
+                    "SELECT legislator_id, chamber, start_date, end_date, party"
+                    " FROM legislator_terms ORDER BY 1, 3"
+                )
+                if row[0] in referenced
+            ],
+        )
         votes.executemany(
             "INSERT INTO legislator_service VALUES (?, ?, ?, ?, ?, ?)",
             [(lid, ch, term, *w) for (lid, ch, term), w in windows.items()],

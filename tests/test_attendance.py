@@ -14,8 +14,8 @@ def pipeline_db():
             (lid, name, f"https://example.org/{lid}.jpg" if lid != 3 else None),
         )
         cva.execute(
-            "INSERT INTO legislator_terms VALUES (?, ?, '2022-07-20', '2026-07-19', NULL, ?, '')",
-            (lid, CAMARA, json.dumps({})),
+            "INSERT INTO legislator_terms VALUES (?, ?, '2022-07-20', '2026-07-19', ?, ?, '')",
+            (lid, CAMARA, "Liberal" if lid == 1 else None, json.dumps({})),
         )
     return cva
 
@@ -131,4 +131,12 @@ def test_legislators_referenced_by_votes_get_name_and_photo(tmp_path):
     assert votes.execute("SELECT * FROM legislators ORDER BY id").fetchall() == [
         (1, "Ana Pérez", "https://example.org/1.jpg"),
         (3, "Carla Díaz", None),
+    ]
+
+
+def test_referenced_legislators_get_their_terms(tmp_path):
+    votes = votes_db(tmp_path, [(1, 1, "2024-10-01", 1)], {1: [1]})
+    attendance.build(votes, pipeline_db())
+    assert votes.execute("SELECT * FROM legislator_terms").fetchall() == [
+        (1, CAMARA, "2022-07-20", "2026-07-19", "Liberal"),
     ]
