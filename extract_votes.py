@@ -492,7 +492,8 @@ def extract_chunk(meta, chunk):
             f"ACTA HEADER / ROLL CALL (context only):\n{ctx}\n\n"
             f"TEXT:\n{body}")
     try:
-        return call_llm(PROMPT, user).get("votes", []), None
+        votes = call_llm(PROMPT, user).get("votes")
+        return (votes if isinstance(votes, list) else []), None
     except BudgetExceeded:
         raise
     except Exception as e:
@@ -512,6 +513,15 @@ def skipped_rows(records):
     return missing
 
 
+def clean_record(record):
+    """A record from the model with its fields in the types the rest of the
+    code expects; anything unusable becomes empty or 0."""
+    totals = record.get("totals") if isinstance(record.get("totals"), dict) else {}
+    as_int = lambda v: int(v) if isinstance(v, (int, float)) else int(v) if isinstance(v, str) and v.strip().isdigit() else 0
+    return {**record, "kind": str(record.get("kind") or "").strip().lower(), "title": str(record.get("title") or ""),
+            "date": str(record.get("date") or ""), "totals": {"si": as_int(totals.get("si")), "no": as_int(totals.get("no"))}}
+
+
 def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_RETRY_DPI)):
     """Voting records the model read from one page image, and the error if the
     call failed. A page read as having no records, or whose electronic record
@@ -525,10 +535,9 @@ def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_R
     try:
         for dpi in dpis:
             out = call_llm(RECORD_PROMPT, user, page.get_pixmap(dpi=dpi).tobytes("png"), VISION_MODEL)
-            records = [read_rows(r, members) for r in out.get("records", []) if isinstance(r, dict)]
+            found = out.get("records")
+            records = [read_rows(clean_record(r), members) for r in found if isinstance(r, dict)] if isinstance(found, list) else []
             records = [r for r in records if r["rows"]]
-            for r in records:
-                r["kind"] = str(r.get("kind", "")).strip().lower()
             better = lambda a, b: (bool(a), -skipped_rows(a)) > (bool(b), -skipped_rows(b))
             if best is None or better(records, best):
                 best = records
@@ -889,8 +898,8 @@ def save_document(conn, doc, found):
                        subject, description, result, vote_type, page, source, verified,
                        check_note, raw_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, v.get("session_date"), v.get("acta"), v.get("bill_name"),
-                 v.get("bill_title"), v.get("subject"), v.get("description"),
+                (doc_id, *(v.get(k) if isinstance(v.get(k), str) else None for k in
+                           ("session_date", "acta", "bill_name", "bill_title", "subject", "description")),
                  v.get("result") if v.get("result") in RESULTS else "unknown",
                  v.get("vote_type") if v.get("vote_type") in VOTE_TYPES else None,
                  page_of(v), v.get("source", "text"), v.get("verified"), v.get("check_note"),
@@ -954,6 +963,24 @@ def main():
     futures = {ex.submit(extract_chunk, meta, c): ("chunk", doc, c[0]) for doc, meta, c in jobs}
     futures |= {ex.submit(extract_record_page, meta, path, page_no, members): ("record", doc, page_no)
                 for doc, meta, path, page_no, members in record_jobs}
+
+    def finish(doc):
+        """Assemble and save a document whose calls have all returned, or first
+        queue rechecks of the pages of votes that don't add up. Returns the
+        number of votes saved."""
+        if "votes" not in doc:
+            doc["votes"] = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
+            doc["retry"] = {}
+            for page_no in pages_to_recheck(doc, doc["votes"]):
+                futures[ex.submit(extract_record_page, *doc["record_args"][page_no],
+                                  dpis=(RECORD_RETRY_DPI,))] = ("recheck", doc, page_no)
+                doc["pending"] += 1
+            if doc["pending"]:
+                return 0
+        return save_document(conn, doc, with_rechecks(doc, doc["votes"], doc["retry"])
+                             if doc["retry"] else doc["votes"])
+
+    unsaved = []
     try:
         while futures:
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
@@ -972,28 +999,26 @@ def main():
                 doc["pending"] -= 1
                 if doc["pending"]:
                     continue
-                if "votes" not in doc:
-                    # First pass done: read the pages of votes that don't add up
-                    # again, alongside other documents' calls.
-                    doc["votes"] = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
-                    doc["retry"] = {}
-                    for page_no in pages_to_recheck(doc, doc["votes"]):
-                        futures[ex.submit(extract_record_page, *doc["record_args"][page_no],
-                                          dpis=(RECORD_RETRY_DPI,))] = ("recheck", doc, page_no)
-                        doc["pending"] += 1
-                    if doc["pending"]:
-                        continue
-                total += save_document(conn, doc, with_rechecks(doc, doc["votes"], doc["retry"])
-                                       if doc["retry"] else doc["votes"])
+                # Model output that trips up assembly or saving costs only its
+                # own document, which isn't saved and so is processed again on
+                # the next run.
+                try:
+                    total += finish(doc)
+                except Exception as e:
+                    print(f"  {doc['source_file']}: not saved: {e!r}", file=sys.stderr)
+                    unsaved.append(doc["source_file"])
     except BudgetExceeded as e:
-        ex.shutdown(wait=False, cancel_futures=True)
         sys.exit(f"Stopping: the LLM account is out of budget ({e}). "
                  f"Documents finished so far are saved in {args.db}.")
-    ex.shutdown()
+    finally:
+        # Don't let queued calls run (and cost money) after the loop is gone.
+        ex.shutdown(wait=False, cancel_futures=True)
     failed = sum(d["chunks_failed"] + d["record_pages_failed"] for d in docs)
-    print(f"Wrote {total} votes from {len(docs)} PDFs to {args.db}"
-          + (f"; {failed} calls failed, see documents.chunks_failed and record_pages_failed" if failed else ""),
+    print(f"Wrote {total} votes from {len(docs) - len(unsaved)} PDFs to {args.db}"
+          + (f"; {failed} calls failed, see documents.chunks_failed and record_pages_failed" if failed else "")
+          + (f"; not saved: {', '.join(unsaved)}" if unsaved else ""),
           file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
