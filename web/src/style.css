@@ -45,7 +45,7 @@ button { font: inherit; cursor: pointer; }
 .toggle button { background: var(--panel); color: var(--text); border: 0; padding: 0 14px; font-weight: 600; font-size: 13px; }
 .toggle button.on { background: var(--text); color: var(--bg); }
 .dates { display: flex; gap: 12px; align-items: center; margin-top: 10px; color: var(--muted); font-size: 13px; }
-.dates input { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--text);
+.dates input, .dates select { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--text);
   font-family: var(--mono); font-size: 12px; padding: 5px 8px; margin-left: 6px; }
 button.link { background: none; border: 0; color: var(--link); padding: 0; }
 main { margin-top: 28px; }
