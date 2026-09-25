@@ -32,19 +32,16 @@ import sys
 import threading
 import time
 import unicodedata
+from collections import deque
 import urllib.error
 import urllib.request
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 
 import pymupdf
 
 API_BASE = os.environ.get("LLM_BASE_URL", "https://gateway.mircloud.trytokenfactory.dev/v1")
 MODEL = os.environ.get("LLM_MODEL", "deepseek-v4.1-flash-uncensored-fp8")
-# "anthropic" -> /messages (Claude models), "responses" -> /responses (GPT models on
-# OpenCode), "openai" -> /chat/completions (most others)
-API_STYLE = os.environ.get("LLM_API_STYLE", "anthropic" if MODEL.startswith("claude")
-                           else "responses" if MODEL.startswith("gpt-") else "openai")  # see api_style()
 # Some gateways (e.g. OpenCode's) sit behind Cloudflare, which rejects urllib's default User-Agent.
 USER_AGENT = "colombia-vote-audit/0.1"
 
@@ -61,6 +58,9 @@ TEMPERATURE = float(os.environ["LLM_TEMPERATURE"]) if os.environ.get("LLM_TEMPER
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT") or None
 REQUEST_TIMEOUT = 600  # seconds; a chunk with long roll calls can take minutes
 WORKERS = int(os.environ.get("LLM_WORKERS", "8"))  # parallel calls
+# Documents parsed but not yet saved: enough queued calls to keep the workers
+# busy, without holding every PDF's text in memory on a large run.
+OPEN_DOCUMENTS = 4 * WORKERS
 # House plenary sessions vote electronically: the text names only members who
 # voted by hand, and everyone else is in a scanned voting record printed as an
 # image ("PUBLICACIÓN REGISTRO DE VOTACIÓN"), next to a scanned "REGISTRO
@@ -399,6 +399,8 @@ def retry_delay(error, attempt):
 
 
 def api_style(model):
+    """"anthropic" -> /messages (Claude models), "responses" -> /responses (GPT
+    models on OpenCode), "openai" -> /chat/completions (most others)."""
     if os.environ.get("LLM_API_STYLE"):
         return os.environ["LLM_API_STYLE"]
     return "anthropic" if model.startswith("claude") else "responses" if model.startswith("gpt-") else "openai"
@@ -958,6 +960,17 @@ def save_document(conn, doc, found):
     return saved
 
 
+def prepare(path):
+    """What the model calls need from one PDF: its text, chunks, record pages,
+    hash and header. Runs in a separate process, so PDFs are parsed in
+    parallel with each other and with the model calls."""
+    pages = load_pages(path)
+    with open(path, "rb") as f:
+        sha256 = hashlib.sha256(f.read()).hexdigest()
+    return {"path": path, "pages": pages, "chunks": build_chunks(pages), "recs": record_pages(path, pages),
+            "sha256": sha256, "meta": {**gaceta_meta(pages[0] if pages else ""), "source_file": os.path.basename(path)}}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pdfs", nargs="+")
@@ -971,47 +984,45 @@ def main():
     conn = open_db(args.db)
     legislators = sqlite3.connect(f"file:{args.legislators}?mode=ro", uri=True) if args.legislators else None
     prompt_sha256 = hashlib.sha256((PROMPT + RECORD_PROMPT).encode()).hexdigest()
-    docs, jobs, record_jobs = [], [], []
-    for path in args.pdfs:
-        pages = load_pages(path)
-        chunks = build_chunks(pages)
-        recs = record_pages(path, pages)
-        with open(path, "rb") as f:
-            sha256 = hashlib.sha256(f.read()).hexdigest()
-        meta = {**gaceta_meta(pages[0]), "source_file": os.path.basename(path)}
-        doc = {**meta, "sha256": sha256, "pages": len(pages), "chunks": len(chunks),
+    print(f"Calling {MODEL} ({api_style(MODEL)}) on text chunks"
+          + (f" and {VISION_MODEL} ({api_style(VISION_MODEL)}) on voting-record pages" if VISION_MODEL != MODEL else "")
+          + "...", file=sys.stderr)
+
+    ex = ThreadPoolExecutor(WORKERS)
+    parser = ProcessPoolExecutor(min(os.cpu_count() or 1, OPEN_DOCUMENTS))
+    futures = {}    # model call -> (kind, doc, chunk start or page)
+    preparing = {}  # parse -> path
+    queue = deque(args.pdfs)
+    open_docs, total, failed, unsaved = 0, 0, 0, []
+
+    def start(prepared):
+        """Queue the model calls for a parsed PDF, or save it straight away if
+        nothing in it looks like a vote. Returns whether it's now open."""
+        pages, meta, path = prepared["pages"], prepared["meta"], prepared["path"]
+        chunks, recs = prepared["chunks"], prepared["recs"]
+        doc = {**meta, "sha256": prepared["sha256"], "pages": len(pages), "chunks": len(chunks),
                "chunks_failed": 0, "record_pages": len(recs), "record_pages_failed": 0,
                "model": MODEL, "prompt_sha256": prompt_sha256,
                "pending": len(chunks) + len(recs), "found": [], "records": [], "page_texts": pages,
                "record_args": {}}
-        docs.append(doc)
-        jobs += [(doc, meta, c) for c in chunks]
+        print(f"{path}: {len(pages)} pages, {len(chunks)} chunks"
+              + (f", {len(recs)} voting-record pages" if recs else ""), file=sys.stderr)
+        for c in chunks:
+            futures[ex.submit(extract_chunk, meta, c)] = ("chunk", doc, c[0])
         for page_no in recs:
             m = RECORD_DATE.search(pages[page_no - 1])
             day = (f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else
                    session_day(pages) or spanish_date(meta["publication_date"]))
-            record_jobs.append((doc, meta, path, page_no, members_on(legislators, day)))
-            doc["record_args"][page_no] = (meta, path, page_no, record_jobs[-1][4])
-        print(f"{path}: {len(pages)} pages, {len(chunks)} chunks"
-              + (f", {len(recs)} voting-record pages" if recs else ""), file=sys.stderr)
-
-    total = 0
-    for doc in docs:
+            doc["record_args"][page_no] = (meta, path, page_no, members_on(legislators, day))
+            futures[ex.submit(extract_record_page, *doc["record_args"][page_no])] = ("record", doc, page_no)
         if not doc["pending"]:  # no pages that look like votes; record it as processed
             save_document(conn, doc, [])
-
-    print(f"Calling {MODEL} ({API_STYLE}) on {len(jobs)} chunks"
-          + (f" and {VISION_MODEL} on {len(record_jobs)} voting-record pages" if record_jobs else "") + "...",
-          file=sys.stderr)
-    ex = ThreadPoolExecutor(WORKERS)
-    futures = {ex.submit(extract_chunk, meta, c): ("chunk", doc, c[0]) for doc, meta, c in jobs}
-    futures |= {ex.submit(extract_record_page, meta, path, page_no, members): ("record", doc, page_no)
-                for doc, meta, path, page_no, members in record_jobs}
+        return bool(doc["pending"])
 
     def finish(doc):
         """Assemble and save a document whose calls have all returned, or first
         queue rechecks of the pages of votes that don't add up. Returns the
-        number of votes saved."""
+        number of votes saved, or None while rechecks are pending."""
         if "votes" not in doc:
             doc["votes"] = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
             doc["retry"] = {}
@@ -1020,15 +1031,27 @@ def main():
                                   dpis=(RECORD_RETRY_DPI,))] = ("recheck", doc, page_no)
                 doc["pending"] += 1
             if doc["pending"]:
-                return 0
+                return None
         return save_document(conn, doc, with_rechecks(doc, doc["votes"], doc["retry"])
                              if doc["retry"] else doc["votes"])
 
-    unsaved = []
     try:
-        while futures:
-            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+        while True:
+            while queue and len(preparing) + open_docs < OPEN_DOCUMENTS:  # parse ahead
+                path = queue.popleft()
+                preparing[parser.submit(prepare, path)] = path
+            if not futures and not preparing:
+                break
+            done, _ = wait([*futures, *preparing], return_when=FIRST_COMPLETED)
             for fut in done:
+                if fut in preparing:
+                    path = preparing.pop(fut)
+                    try:
+                        open_docs += start(fut.result())
+                    except Exception as e:
+                        print(f"  {path}: couldn't read: {e!r}", file=sys.stderr)
+                        unsaved.append(os.path.basename(path))
+                    continue
                 kind, doc, key = futures.pop(fut)
                 result, error = fut.result()
                 if kind == "chunk":
@@ -1047,18 +1070,23 @@ def main():
                 # own document, which isn't saved and so is processed again on
                 # the next run.
                 try:
-                    total += finish(doc)
+                    saved = finish(doc)
                 except Exception as e:
                     print(f"  {doc['source_file']}: not saved: {e!r}", file=sys.stderr)
                     unsaved.append(doc["source_file"])
+                    saved = 0
+                if saved is not None:
+                    open_docs -= 1
+                    total += saved
+                    failed += doc["chunks_failed"] + doc["record_pages_failed"]
     except BudgetExceeded as e:
         sys.exit(f"Stopping: the LLM account is out of budget ({e}). "
                  f"Documents finished so far are saved in {args.db}.")
     finally:
         # Don't let queued calls run (and cost money) after the loop is gone.
         ex.shutdown(wait=False, cancel_futures=True)
-    failed = sum(d["chunks_failed"] + d["record_pages_failed"] for d in docs)
-    print(f"Wrote {total} votes from {len(docs) - len(unsaved)} PDFs to {args.db}"
+        parser.shutdown(wait=False, cancel_futures=True)
+    print(f"Wrote {total} votes from {len(args.pdfs) - len(unsaved)} PDFs to {args.db}"
           + (f"; {failed} calls failed, see documents.chunks_failed and record_pages_failed" if failed else "")
           + (f"; not saved: {', '.join(unsaved)}" if unsaved else ""),
           file=sys.stderr)
