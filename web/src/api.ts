@@ -76,10 +76,66 @@ export interface Stats {
   download_bytes: number; // gzipped
 }
 
+// The House barcode (cva.barcode). Cells: y yes, n no, b abstained,
+// s in session but didn't vote, a absent that day, . not in the chamber.
+export interface BarcodeRow {
+  id: number;
+  name: string;
+  party: string; // party family, e.g. "Liberal"
+  party_name: string | null;
+  cells: string;
+}
+
+export interface BarcodeCol {
+  id: number;
+  date: string;
+  res: "approved" | "rejected" | "unknown";
+  type: VoteType | null;
+  subj: string;
+  bill: string;
+  title: string;
+  y: number;
+  n: number;
+  b: number;
+  gov: "yes" | "no" | "abstain" | null; // how most Pacto Histórico members voted
+  gac: string | null;
+  page: number | null;
+  doc: number;
+  contested: boolean;
+}
+
+export interface BarcodeData {
+  parties: string[];
+  rows: BarcodeRow[];
+  cols: BarcodeCol[];
+  ask: boolean; // whether the server answers questions
+}
+
+export interface Turn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AskReply {
+  answer: string;
+  view: Record<string, unknown> | null;
+  queries: Record<string, unknown>[];
+}
+
 async function get<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") qs.set(k, String(v));
   const res = await fetch(qs.size ? `${path}?${qs}` : path);
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? res.statusText);
+  return res.json();
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? res.statusText);
   return res.json();
 }
@@ -91,4 +147,6 @@ export const api = {
   vote: (id: number) => get<VoteDetail>(`/api/votes/${id}`),
   legislators: (q?: string) => get<{ total: number; legislators: LegislatorSummary[] }>("/api/legislators", { q }),
   legislator: (id: number) => get<LegislatorDetail>(`/api/legislators/${id}`),
+  barcode: () => get<BarcodeData>("/api/barcode"),
+  ask: (body: { turns: Turn[]; view: unknown; lang: string }) => post<AskReply>("/api/ask", body),
 };

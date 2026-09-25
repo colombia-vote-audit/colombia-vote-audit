@@ -221,3 +221,55 @@ def test_cache_headers_follow_how_often_things_change(votes_db, tmp_path):
     assert "immutable" in client.get("/assets/index-abc123.js").headers["cache-control"]
     assert client.get("/api/votes").headers["cache-control"] == "public, max-age=300"
     assert "cache-control" not in client.get("/api/votes/999").headers
+
+
+def test_barcode_is_served_gzipped_with_the_question_box_off(client):
+    r = client.get("/api/barcode")
+    assert r.headers["content-encoding"] == "gzip"
+    body = r.json()
+    assert body["ask"] is False
+    assert [c["id"] for c in body["cols"]] == [1]
+    assert {row["id"]: row["cells"] for row in body["rows"]} == {1: "y", 2: "n", 3: "s"}
+    turns = [{"role": "user", "content": "hola"}]
+    assert client.post("/api/ask", json={"turns": turns}).status_code == 503
+
+
+def test_questions_are_checked_limited_and_not_cached(votes_db, monkeypatch):
+    replies = []
+
+    def model(messages, tools):
+        replies.append(messages)
+        return {"content": '{"answer": "Hola [m:1].", "view": {"pins": [1, 77]}}'}
+
+    monkeypatch.setattr(web, "ASK_LIMIT", 2)
+    client = TestClient(web.create_app(votes_db, llm=model))
+    assert client.get("/api/barcode").json()["ask"] is True
+    ok = client.post(
+        "/api/ask", json={"turns": [{"role": "user", "content": "¿Quién?"}], "lang": "es"}
+    )
+    assert ok.json() == {
+        "answer": "Hola [m:1].",
+        "view": {"pins": [1]},
+        "queries": [],
+    }
+    assert "cache-control" not in ok.headers
+    assert '"es"' in replies[0][0]["content"]
+    bad = [
+        {"turns": []},
+        {"turns": [{"role": "assistant", "content": "hi"}]},
+        {"turns": [{"role": "user", "content": "x" * 601}]},
+        {"nope": 1},
+    ]
+    assert [client.post("/api/ask", json=b).status_code for b in bad] == [400] * 4
+    turns = [{"role": "user", "content": "otra"}]
+    assert client.post("/api/ask", json={"turns": turns}).status_code == 200
+    assert client.post("/api/ask", json={"turns": turns}).status_code == 429
+
+
+def test_a_failing_model_is_a_502(votes_db):
+    def model(messages, tools):
+        raise web.httpx.ConnectError("down")
+
+    client = TestClient(web.create_app(votes_db, llm=model))
+    r = client.post("/api/ask", json={"turns": [{"role": "user", "content": "hola"}]})
+    assert r.status_code == 502 and "try again" in r.json()["error"]

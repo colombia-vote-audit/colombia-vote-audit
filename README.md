@@ -119,6 +119,30 @@ uv run python -m cva.web votes.db --pdfs data/pdfs --static web/dist   # http://
 - A vote with no session date takes the date of the other votes in its gazette, else the gazette's publication date. The site marks these dates.
 - For frontend work, run the API as above and `npm run dev` in `web/`. Vite forwards `/api` and `/pdf` to port 8000.
 
+### The House barcode
+
+`#/barcode` shows every representative's ballot on every checked House roll call as one grid (`cva.barcode`). Rows are grouped by party, columns are votes, and each cell is one ballot. Readers can do the following:
+- Choose which votes to show: a threshold for how close a vote was (the least share the losing side got, 0–50%, 15% by default), kinds of vote, a bill or topic, and a date range (drag across the grid to zoom).
+- Color the cells by party A vs party B (any two parties), agreement with party A, the member's own party majority, yes/no, the winning side, or attendance.
+- Order columns by date, by party A's vote or closest first.
+- Group rows by party, or rank every member by agreement with party A on the votes shown.
+- Pin members and show only chosen parties.
+
+Every setting is kept in the URL, so any view can be shared as a link.
+
+A question box lets readers ask about the grid in plain language (`cva.ask`). A language model looks up figures through one tool (`Grid.query`), so the numbers it quotes are computed from the data. It answers with text that links to votes and members, and a view to show. It needs an OpenAI-compatible endpoint:
+
+```sh
+export CVA_LLM_BASE_URL=https://gateway.example.com
+export CVA_LLM_API_KEY=...            # keep it out of the repo; .env is gitignored
+export CVA_LLM_MODEL=glm-5.3-flash-uncensored-fp8
+uv run python -m cva.web votes.db --pdfs data/pdfs --static web/dist
+```
+
+- If any of the three variables is missing, the question box is hidden.
+- Each visitor gets 15 questions per 10 minutes (`ASK_LIMIT` and `ASK_WINDOW` in `cva.web`), because each question is paid for. Behind a proxy, the limit keys on the first `X-Forwarded-For` address.
+- The model must answer after calling tools. On the TokenFactory gateway, `glm-5.3-flash-uncensored-fp8` answers after its tool calls in about 3–8 s. Its `deepseek-v4.1-flash` model returns empty replies after tool calls.
+
 ## Deployment
 
 `flake.nix` exports `nixosModules.default`:

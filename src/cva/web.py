@@ -24,36 +24,53 @@ Endpoints:
     GET /api/legislators/{id}
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
     GET /download-db            the votes database itself, gzipped, for anyone to use
+    GET /api/barcode            every House member's ballot on every checked roll call
+                                (cva.barcode), and whether the question box is on
+    POST /api/ask               {turns: [{role, content}], view, lang}: a question about
+                                the barcode, answered by a language model with text and
+                                a view to show (cva.ask)
+
+The question box is on when CVA_LLM_BASE_URL, CVA_LLM_API_KEY and
+CVA_LLM_MODEL are set; each visitor gets ASK_LIMIT questions per ASK_WINDOW
+seconds, since every one is paid for.
 
 Built frontend files under /assets/ have content hashes in their names and
-are cached for a year; API answers for five minutes, since they only change
-on a restart; index.html is revalidated on every load, so deploys show up.
+are cached for a year; API answers (GET) for five minutes, since they only
+change on a restart; index.html is revalidated on every load, so deploys show up.
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import re
 import shutil
 import sqlite3
-import unicodedata
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from cva import ask as asking
+from cva.barcode import Grid
 from cva.gazette import publication_date
 from cva.store import BlobStore
+from cva.text import fold
 
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+ASK_LIMIT = 15
+ASK_WINDOW = 600
 REQUIRED_TABLES = {
     "legislators",
     "legislator_terms",
@@ -62,12 +79,6 @@ REQUIRED_TABLES = {
     "vote_attendance",
     "text_record_legislators",
 }
-
-
-def fold(s: str | None) -> str:
-    """Lowercase without accents, for search."""
-    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
-    return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
 def iso_date(s: str | None) -> str | None:
@@ -108,6 +119,7 @@ class Data:
         self.order = sorted(
             self.votes.values(), key=lambda v: (v["date"] or "", v["id"]), reverse=True
         )
+        self.grid = Grid(conn, self.party_on)
         self.records = conn.execute(
             "SELECT count(*) FROM vote_records WHERE vote_id IN"
             " (SELECT id FROM votes WHERE coalesce(is_committee, 0) = 0)"
@@ -212,7 +224,7 @@ class CacheHeaders:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
+        if scope["type"] != "http" or scope["method"] not in ("GET", "HEAD"):
             return await self.app(scope, receive, send)
         policy = cache_policy(scope["path"]).encode()
 
@@ -248,8 +260,36 @@ def query_int(request: Request, key: str, default: int, most: int) -> int:
         raise HTTPException(400, f"{key} must be a number") from None
 
 
-def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = None):
+class RateLimit:
+    """At most `limit` calls per `window` seconds for each key."""
+
+    def __init__(self, limit: int, window: float):
+        self.limit, self.window = limit, window
+        self.calls: dict[str, deque] = defaultdict(deque)
+
+    def allow(self, key: str) -> bool:
+        now, calls = time.monotonic(), self.calls[key]
+        while calls and calls[0] < now - self.window:
+            calls.popleft()
+        if len(calls) >= self.limit:
+            return False
+        calls.append(now)
+        return True
+
+
+def create_app(
+    votes_db: Path,
+    pdfs: Path | None = None,
+    static: Path | None = None,
+    llm: asking.Complete | None = None,
+):
+    """`llm` answers the question box; without it the box is off."""
     data = Data(votes_db)
+    barcode_json = json.dumps(
+        {**data.grid.payload(), "ask": llm is not None}, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    barcode_gz = gzip.compress(barcode_json, 6)
+    limits = RateLimit(ASK_LIMIT, ASK_WINDOW)
     download_name = (
         f"colombia-vote-audit-{datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()}.db"
     )
@@ -435,6 +475,42 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
             content_disposition_type="inline",
         )
 
+    def barcode(request: Request):
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            return Response(
+                barcode_gz,
+                media_type="application/json",
+                headers={"content-encoding": "gzip", "vary": "accept-encoding"},
+            )
+        return Response(barcode_json, media_type="application/json")
+
+    async def ask(request: Request):
+        if llm is None:
+            raise HTTPException(503, "questions are turned off on this server")
+        try:
+            body = await request.json()
+            turns = [
+                {"role": t["role"], "content": str(t["content"])}
+                for t in body["turns"]
+                if t["role"] in ("user", "assistant") and str(t["content"]).strip()
+            ]
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(400, "send {turns: [{role, content}], view, lang}") from None
+        if not turns or turns[-1]["role"] != "user":
+            raise HTTPException(400, "the last turn must be the reader's question")
+        if len(turns[-1]["content"]) > asking.MAX_CHARS:
+            raise HTTPException(400, f"keep questions under {asking.MAX_CHARS} characters")
+        client = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if not limits.allow(client or (request.client.host if request.client else "")):
+            raise HTTPException(429, "too many questions; try again in a few minutes")
+        view = body.get("view") if isinstance(body.get("view"), dict) else {}
+        lang = "es" if body.get("lang") == "es" else "en"
+        try:
+            answer = await run_in_threadpool(asking.ask, data.grid, llm, turns, view, lang)
+        except (httpx.HTTPError, RuntimeError, KeyError, IndexError):
+            raise HTTPException(502, "the model didn't answer; try again") from None
+        return JSONResponse(answer)
+
     def download_db(request: Request):
         """The whole database the site reads, committee votes included."""
         return FileResponse(download, media_type="application/gzip", filename=f"{download_name}.gz")
@@ -450,6 +526,8 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
         Route("/api/legislators/{id:int}", legislator),
         Route("/pdf/{id:int}", pdf),
         Route("/download-db", download_db),
+        Route("/api/barcode", barcode),
+        Route("/api/ask", ask, methods=["POST"]),
     ]
     if static:
         routes.append(Mount("/", StaticFiles(directory=static, html=True)))
@@ -470,7 +548,12 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
-    uvicorn.run(create_app(args.votes_db, args.pdfs, args.static), host=args.host, port=args.port)
+    llm = asking.from_env()
+    if llm is None:
+        print("question box off: set CVA_LLM_BASE_URL, CVA_LLM_API_KEY and CVA_LLM_MODEL")
+    uvicorn.run(
+        create_app(args.votes_db, args.pdfs, args.static, llm), host=args.host, port=args.port
+    )
 
 
 if __name__ == "__main__":

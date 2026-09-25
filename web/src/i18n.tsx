@@ -83,6 +83,94 @@ const en = {
   downloadNote: (gz: string, db: string) =>
     `SQLite, gzipped: ${gz} MB (${db} MB unpacked). Every vote, name and check behind this site, plus the committee votes it leaves out.`,
   error: (m: string) => `Couldn't load: ${m}`,
+  bc: {
+    nav: "Barcode",
+    title: "The House barcode",
+    intro:
+      "Every ballot cast by every representative on the House's checked roll calls, 2023–2026, one cell each. Choose which votes to show and what the colors mean, drag across the grid to zoom in, and click a column to see that vote.",
+    readMe:
+      "Rows are representatives; columns are House plenary roll calls read from scanned voting records whose names add up to the printed totals. A party's position on a vote is how most of its members voted; parties with fewer than four members in the data have none. “In session, didn't vote” means the member voted on something else that day; “absent” means no vote was recorded that day. Party is the one each member was elected under for 2022–2026.",
+    colorBy: "Color by",
+    color: { ab: "Party A vs party B", with: "Agreement with party A", party: "Own party", vote: "Yes / no", outcome: "Winning side", attend: "Attendance" },
+    partyA: "Party A",
+    partyB: "Party B",
+    key: (mode: string, a: string, b: string): [string, string][] => {
+      const rest: [string, string][] = [["skip", "In session, didn't vote"], ["away", "Absent that day"]];
+      switch (mode) {
+        case "ab":
+          return [["left", `Sided with ${a}`], ["right", `Sided with ${b}`], ["both", `${a} and ${b} agreed`], ["abst", "Abstained"], ...rest];
+        case "with":
+          return [["yes", `Same side as ${a}`], ["no", `Against ${a}`], ...rest];
+        case "party":
+          return [["yes", "With own party's majority"], ["no", "Broke with own party"], ["skip", "Didn't vote, or no party position"], ["away", "Absent that day"]];
+        case "vote":
+          return [["yes", "Yes"], ["no", "No"], ["abst", "Abstained"], ...rest];
+        case "outcome":
+          return [["yes", "On the winning side"], ["no", "On the losing side"], ...rest];
+        default:
+          return [["away", "Voted"], ["abst", "In session, didn't vote"], ["no", "Absent that day"]];
+      }
+    },
+    notInChamber: "Not in the chamber",
+    whichVotes: "Which votes",
+    everyVote: "Every vote, however lopsided",
+    threshold: (n: number) => `Only votes where the losing side got at least ${n}%`,
+    shown: (n: string, total: string) => `${n} of ${total} roll calls`,
+    voteTypes: "Kinds of vote:",
+    topic: "Bill or topic",
+    topicPlaceholder: "e.g. laboral, salud, 166 de 2023",
+    topics: [
+      ["Labor reform", "166 de 2023"],
+      ["Pension reform", "pensional"],
+      ["Health reform", "sistema de salud"],
+    ] as [string, string][],
+    zoomed: (a: string, b: string) => `Zoomed to ${a || "the start"} – ${b || "the end"}.`,
+    resetZoom: "Reset zoom",
+    arrange: "Arrange",
+    columns: "Columns",
+    byDate: "By date",
+    byA: "By party A's vote",
+    byMargin: "Closest first",
+    rowsLabel: "Rows",
+    byParty: "Grouped by party",
+    byAgreement: "Ranked by agreement with party A",
+    rows: { compact: "Compact", tall: "Tall", named: "Named" },
+    pin: "Pin a representative",
+    pinPlaceholder: "Type a name",
+    unpin: "Unpin",
+    showOnly: "Show only:",
+    party: (p: string) => p,
+    gridLabel: "Grid of every House member's ballot on every checked roll call",
+    noMatch: "No roll calls match. Lower the threshold or clear the filters.",
+    axis: (n: number) => `${n} roll calls · drag across the grid to zoom`,
+    rollCalls: (n: number) => `${n} roll calls`,
+    aYes: (p: string) => `${p} voted yes →`,
+    aNo: (p: string) => `← ${p} voted no`,
+    closest: "Closest votes →",
+    widest: "← Most one-sided",
+    cell: { y: "Yes", n: "No", b: "Abstained", s: "In session, didn't vote", a: "Absent", ".": "Not in the chamber" },
+    split: "no position",
+    pickColumn: "The closest vote shown · click any column to change",
+    rollCall: "Roll call",
+    counts: (y: number, n: number, b: number) => `${y} yes · ${n} no${b ? ` · ${b} abstained` : ""}`,
+    margin: (pct: number) => `losing side ${pct}%`,
+    openVote: "Open the vote and its gazette page",
+    partyBreakdown: "How each party voted (yes · no · abstained · didn't vote · absent)",
+    askTitle: "Ask the barcode",
+    askPlaceholder: "e.g. Show the labor reform votes where the losing side got at least 40%",
+    askButton: "Ask",
+    examples: [
+      "Show only votes where the losing side got at least 40%, colored La U vs Centro Democrático",
+      "Rank every representative by agreement with the Pacto on the pension reform",
+      "Who broke with their own party most on the labor reform?",
+      "Who was in session but didn't vote on the closest votes?",
+    ],
+    thinking: "Looking through the votes…",
+    lookedUp: (s: string) => `Looked up: ${s}`,
+    askError: (m: string) => `No answer: ${m}`,
+    askNote:
+      "Answers are written by a language model from these records only; every figure comes from the grid. Check key numbers against the grid and the cited gazette pages.",
+  },
 };
 
 type Dict = typeof en;
@@ -163,6 +251,94 @@ const es: Dict = {
   downloadNote: (gz, db) =>
     `SQLite comprimido con gzip: ${gz} MB (${db} MB descomprimido). Todas las votaciones, nombres y verificaciones de este sitio, más las votaciones de comisión que no muestra.`,
   error: (m) => `No se pudo cargar: ${m}`,
+  bc: {
+    nav: "Código de barras",
+    title: "El código de barras de la Cámara",
+    intro:
+      "Cada voto de cada representante en las votaciones nominales verificadas de la Cámara, 2023–2026, una celda por voto. Elija qué votaciones mostrar y qué significan los colores, arrastre sobre la cuadrícula para acercarse y haga clic en una columna para ver esa votación.",
+    readMe:
+      "Las filas son representantes; las columnas, votaciones nominales de la plenaria de la Cámara leídas de registros escaneados cuyos nombres suman los totales impresos. La posición de un partido en una votación es cómo votó la mayoría de sus miembros; los partidos con menos de cuatro miembros en los datos no tienen. “En sesión, no votó” significa que votó en otra votación ese día; “ausente”, que no hay votos registrados ese día. El partido es aquel por el que fue elegido para 2022–2026.",
+    colorBy: "Colorear por",
+    color: { ab: "Partido A vs partido B", with: "Acuerdo con el partido A", party: "Su partido", vote: "Sí / no", outcome: "Lado ganador", attend: "Asistencia" },
+    partyA: "Partido A",
+    partyB: "Partido B",
+    key: (mode, a, b) => {
+      const rest: [string, string][] = [["skip", "En sesión, no votó"], ["away", "Ausente ese día"]];
+      switch (mode) {
+        case "ab":
+          return [["left", `Con ${a}`], ["right", `Con ${b}`], ["both", `${a} y ${b} coincidieron`], ["abst", "Se abstuvo"], ...rest];
+        case "with":
+          return [["yes", `Del lado de ${a}`], ["no", `En contra de ${a}`], ...rest];
+        case "party":
+          return [["yes", "Con la mayoría de su partido"], ["no", "Se apartó de su partido"], ["skip", "No votó, o su partido sin posición"], ["away", "Ausente ese día"]];
+        case "vote":
+          return [["yes", "Sí"], ["no", "No"], ["abst", "Se abstuvo"], ...rest];
+        case "outcome":
+          return [["yes", "Del lado ganador"], ["no", "Del lado perdedor"], ...rest];
+        default:
+          return [["away", "Votó"], ["abst", "En sesión, no votó"], ["no", "Ausente ese día"]];
+      }
+    },
+    notInChamber: "No estaba en la Cámara",
+    whichVotes: "Qué votaciones",
+    everyVote: "Todas las votaciones, aun las muy desiguales",
+    threshold: (n) => `Solo votaciones en que el lado perdedor obtuvo al menos ${n}%`,
+    shown: (n, total) => `${n} de ${total} votaciones`,
+    voteTypes: "Tipos de votación:",
+    topic: "Proyecto o tema",
+    topicPlaceholder: "p. ej. laboral, salud, 166 de 2023",
+    topics: [
+      ["Reforma laboral", "166 de 2023"],
+      ["Reforma pensional", "pensional"],
+      ["Reforma a la salud", "sistema de salud"],
+    ],
+    zoomed: (a, b) => `Acercado a ${a || "el inicio"} – ${b || "el final"}.`,
+    resetZoom: "Quitar acercamiento",
+    arrange: "Organizar",
+    columns: "Columnas",
+    byDate: "Por fecha",
+    byA: "Por voto del partido A",
+    byMargin: "Más reñidas primero",
+    rowsLabel: "Filas",
+    byParty: "Agrupadas por partido",
+    byAgreement: "Por acuerdo con el partido A",
+    rows: { compact: "Compacto", tall: "Alto", named: "Con nombres" },
+    pin: "Fijar un representante",
+    pinPlaceholder: "Escriba un nombre",
+    unpin: "Quitar",
+    showOnly: "Mostrar solo:",
+    party: (p) => (p === "Other parties" ? "Otros partidos" : p),
+    gridLabel: "Cuadrícula con el voto de cada representante en cada votación verificada",
+    noMatch: "Ninguna votación coincide. Baje el umbral o quite filtros.",
+    axis: (n) => `${n} votaciones · arrastre sobre la cuadrícula para acercarse`,
+    rollCalls: (n) => `${n} votaciones`,
+    aYes: (p) => `${p} votó sí →`,
+    aNo: (p) => `← ${p} votó no`,
+    closest: "Más reñidas →",
+    widest: "← Más desiguales",
+    cell: { y: "Sí", n: "No", b: "Se abstuvo", s: "En sesión, no votó", a: "Ausente", ".": "No estaba en la Cámara" },
+    split: "sin posición",
+    pickColumn: "La votación más reñida que se muestra · haga clic en una columna para cambiarla",
+    rollCall: "Votación",
+    counts: (y, n, b) => `${y} sí · ${n} no${b ? ` · ${b} abstenciones` : ""}`,
+    margin: (pct) => `lado perdedor ${pct}%`,
+    openVote: "Abrir la votación y su página de la gaceta",
+    partyBreakdown: "Cómo votó cada partido (sí · no · abstención · no votó · ausente)",
+    askTitle: "Pregúntele al código de barras",
+    askPlaceholder: "p. ej. Muestra las votaciones de la reforma laboral en que el perdedor obtuvo al menos 40%",
+    askButton: "Preguntar",
+    examples: [
+      "Muestra solo votaciones en que el perdedor obtuvo al menos 40%, coloreadas La U vs Centro Democrático",
+      "Ordena a todos los representantes por acuerdo con el Pacto en la reforma pensional",
+      "¿Quién se apartó más de su partido en la reforma laboral?",
+      "¿Quién estaba en sesión pero no votó en las votaciones más reñidas?",
+    ],
+    thinking: "Revisando las votaciones…",
+    lookedUp: (s) => `Consultó: ${s}`,
+    askError: (m) => `Sin respuesta: ${m}`,
+    askNote:
+      "Las respuestas las escribe un modelo de lenguaje solo a partir de estos registros; cada cifra sale de la cuadrícula. Verifique las cifras clave en la cuadrícula y en las páginas de la gaceta citadas.",
+  },
 };
 
 const dicts: Record<Lang, Dict> = { en, es };

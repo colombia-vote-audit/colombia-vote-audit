@@ -3,6 +3,7 @@ import { api } from "./api";
 import { useFetch } from "./common";
 import { useI18n, type Lang } from "./i18n";
 import { go, href, parse, previous, replace, useRoute, type Route } from "./router";
+import { Barcode } from "./views/Barcode";
 import { LegislatorDetail } from "./views/LegislatorDetail";
 import { Legislators } from "./views/Legislators";
 import { VoteDetail } from "./views/VoteDetail";
@@ -14,7 +15,8 @@ export function App() {
   const stats = useFetch(() => api.stats(), []);
 
   const detail = route.path.match(/^\/(vote|legislator)\/(\d+)$/);
-  const onList = !detail;
+  const barcode = route.path === "/barcode";
+  const onList = !detail && !barcode;
   // The last list page, so detail pages can link back to the same search.
   const lastList = useRef("#/");
   if (onList) lastList.current = location.hash || "#/";
@@ -50,7 +52,7 @@ export function App() {
   }, [onList, t]);
 
   return (
-    <div className="page">
+    <div className={barcode ? "page wide" : "page"}>
       <header className="top">
         <a className="brand" href="#/">
           <span>{t.title}</span>
@@ -70,7 +72,7 @@ export function App() {
         </div>
       </header>
 
-      <div className="search">
+      {!barcode && <div className="search">
         <SearchInput
           value={q}
           placeholder={mode === "votes" ? t.searchVotes : t.searchLegislators}
@@ -86,9 +88,19 @@ export function App() {
           >
             {t.legislators}
           </button>
+          <button onClick={() => go("#/barcode")}>{t.bc.nav}</button>
         </div>
-      </div>
-      {mode === "votes" && (
+      </div>}
+      {barcode && (
+        <div className="search">
+          <div className="toggle">
+            <button onClick={() => go(listHash({ mode: "votes" }))}>{t.votes}</button>
+            <button onClick={() => go(listHash({ mode: "legislators" }))}>{t.legislators}</button>
+            <button className="on">{t.bc.nav}</button>
+          </div>
+        </div>
+      )}
+      {!barcode && mode === "votes" && (
         <div className="dates">
           <label>
             {t.from} <input type="date" value={from} onChange={(e) => update({ from: e.target.value })} />
@@ -114,6 +126,7 @@ export function App() {
         {detail?.[1] === "legislator" && <LegislatorDetail id={Number(detail[2])} back={back} />}
         {onList && mode === "votes" && <VoteList q={q} from={from} to={to} chamber={chamber} />}
         {onList && mode === "legislators" && <Legislators q={q} />}
+        {barcode && <Barcode />}
       </main>
 
       <footer className="foot">
