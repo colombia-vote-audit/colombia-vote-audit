@@ -88,9 +88,10 @@ After extraction, a second stage works out each legislator's time in office and 
 uv run python -m cva.attendance votes.db   # reads data/cva.db read-only; --cva to change
 ```
 
-It adds five tables to the votes database and rebuilds them on every run:
+It adds six tables to the votes database and rebuilds them on every run:
 - `legislators`: the name and `photo_url` of every legislator the votes refer to, copied from the pipeline database. `photo_url` is a link to the image on Congreso Visible's server, for the frontend to use directly in an `<img>` tag. It is NULL when Congreso Visible has no photo.
 - `legislator_terms`: those legislators' chambers, terms and parties, copied from the pipeline database.
+- `text_record_legislators`: the legislator behind each name on a plenary vote read from the gazette text. Those names are printed as the gazette has them, so each is compared with the members sitting in either chamber on the vote's date, ignoring accents and small words like "de". A name is linked only if exactly one member fits: their words contain one another's and share at least two, or all but one word match and that one is a typo away (`how = 'close'`). About 99% of names are linked. These matches don't affect service windows or absences.
 - `legislator_service`: each legislator's time in office per chamber and term, from their first recorded vote to their last. A replacement's window starts when they begin voting, and the window of the member they replaced ends at that member's last vote.
 - `vote_absences`: for each verified plenary vote, the legislators whose window covers the vote's date but who aren't on its record. `in_session` marks those who voted on another checked vote in the same chamber that day: they were in session but skipped this one.
 - `vote_attendance`: for each of those votes, the date used and where it came from, and how many legislators were eligible, voted, were absent, and were absent but in session.
