@@ -33,6 +33,12 @@ export function LegislatorDetail({ id, back }: { id: number; back: Back }) {
 function Body({ p }: { p: Legislator }) {
   const { t, num } = useI18n();
   const [shown, setShown] = useState(PAGE);
+  const [only, setOnly] = useState<Position | null>(null);
+  const record = only ? p.record.filter((r) => r.position === only) : p.record;
+  const pick = (position: Position | null) => {
+    setOnly(position);
+    setShown(PAGE);
+  };
   const cast = p.totals.yes + p.totals.no + p.totals.abstain;
   const span = p.terms.length ? termYears(p.terms[0].start, p.terms[p.terms.length - 1].end) : null;
   const stats: [string, number, Position | "cast"][] = [
@@ -69,18 +75,34 @@ function Body({ p }: { p: Legislator }) {
       </header>
 
       <div className="stats">
-        {stats.map(([label, n, kind]) => (
-          <div key={kind} className={`c-${kind}`}>
-            <b>{num(n)}</b>
-            <span>{label}</span>
-          </div>
-        ))}
+        {stats.map(([label, n, kind]) => {
+          const position = kind === "cast" ? null : kind;
+          return (
+            <button
+              key={kind}
+              className={`c-${kind}${only === position ? " on" : ""}`}
+              aria-pressed={only === position}
+              onClick={() => pick(position)}
+            >
+              <b>{num(n)}</b>
+              <span>{label}</span>
+            </button>
+          );
+        })}
       </div>
       <p className="note">{t.totalsNote}</p>
 
-      <h2 className="section">{t.votingRecord}</h2>
+      <h2 className="section">
+        {t.votingRecord}
+        {only && (
+          <>
+            {" · "}
+            {t.position[only]} <button className="link" onClick={() => pick(null)}>{t.showAll}</button>
+          </>
+        )}
+      </h2>
       <ul className="rows">
-        {p.record.slice(0, shown).map((r) => (
+        {record.slice(0, shown).map((r) => (
           <li key={`${r.id}-${r.position}`}>
             <a className={`row${r.position === "absent" ? " dim" : ""}`} href={href(`/vote/${r.id}`)}>
               <VoteDate vote={r} />
@@ -99,7 +121,7 @@ function Body({ p }: { p: Legislator }) {
           </li>
         ))}
       </ul>
-      {shown < p.record.length && (
+      {shown < record.length && (
         <button className="more" onClick={() => setShown(shown + PAGE)}>
           {t.showMore}
         </button>

@@ -66,8 +66,9 @@ const en = {
   inOffice: (a: string, b: string) => `In office per recorded votes ${a} → ${b}`,
   votesCast: "Votes cast",
   totalsNote:
-    "Counts cover the votes in this database only. “Didn't vote” is known only for checked plenary votes read from scanned voting records.",
+    "Counts cover the votes in this database only. “Didn't vote” is known only for checked plenary votes read from scanned voting records. Pick a count to list only those votes.",
   votingRecord: "Voting record",
+  showAll: "show all",
   partyThen: (p: string) => `Party then: ${p}`,
   voteResult: (r: string) => `Vote ${r.toLowerCase()}`,
   showMore: "Show more",
@@ -136,8 +137,9 @@ const es: Dict = {
   inOffice: (a, b) => `En el cargo según votos registrados ${a} → ${b}`,
   votesCast: "Votos emitidos",
   totalsNote:
-    "Los conteos cubren solo las votaciones de esta base de datos. “No votó” solo se sabe para votaciones de plenaria verificadas, leídas de registros de votación escaneados.",
+    "Los conteos cubren solo las votaciones de esta base de datos. “No votó” solo se sabe para votaciones de plenaria verificadas, leídas de registros de votación escaneados. Elija un conteo para ver solo esas votaciones.",
   votingRecord: "Historial de votaciones",
+  showAll: "mostrar todo",
   partyThen: (p) => `Partido entonces: ${p}`,
   voteResult: (r) => `Votación: ${r.toLowerCase()}`,
   showMore: "Mostrar más",
