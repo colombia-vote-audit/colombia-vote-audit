@@ -176,9 +176,57 @@ A record's rows can continue from the previous page without its title or totals:
 
 # ---------- PDF -> text ----------
 
+# Some gazettes embed fonts whose character codes are 29 below the real ones
+# ("$&7$" for "ACTA", \x03 for a space), with accented letters shifted the same
+# way from the Mac Roman positions ("p" for "é"). They show up as the shifted
+# space and digits, which no normal text contains.
+CONTROL = re.compile(r"[\x03\x13-\x1c]")
+
+
+def unscramble(text):
+    out = []
+    for c in text:
+        o = ord(c)
+        if 0x03 <= o <= 0x5d and c != "\n":
+            out.append(chr(o + 29))
+        elif 0x5e <= o <= 0x7e:
+            out.append(bytes([o + 0x1e]).decode("mac_roman"))
+        else:
+            out.append({"È": "Á", "Ï": "Ó", "Ò": "Ú", "¿": "fi"}.get(c, c))
+    return "".join(out)
+
+
+def page_words(page):
+    """Words like page.get_text("words") gives them: x0, y0, x1, y1, text,
+    block, line, word. On pages with text in a shifted font, the words are
+    rebuilt from the characters, since PyMuPDF splits at the shifted space and
+    drops the shifted digits. The same font name can carry shifted and normal
+    text, so only spans with a shifted space or digit are decoded; a lone
+    shifted word in a span of its own stays as it is."""
+    if not CONTROL.search(page.get_text()):
+        return page.get_text("words")
+    words = []
+    for b_no, block in enumerate(page.get_text("rawdict")["blocks"]):
+        for l_no, line in enumerate(block.get("lines", [])):
+            chars = []
+            for span in line["spans"]:
+                shifted = CONTROL.search("".join(c["c"] for c in span["chars"]))
+                chars += [(unscramble(c["c"]) if shifted else c["c"], c["bbox"]) for c in span["chars"]]
+            word = []
+            for ch, box in chars + [(" ", None)]:
+                if ch.strip():
+                    word.append((ch, box))
+                elif word:
+                    words.append((min(b[0] for _, b in word), min(b[1] for _, b in word),
+                                  max(b[2] for _, b in word), max(b[3] for _, b in word),
+                                  "".join(c for c, _ in word), b_no, l_no, len(words)))
+                    word = []
+    return words
+
+
 def page_text(page):
     """Page text with vote-table X marks labeled by column (SÍ / NO / ABST)."""
-    words = page.get_text("words")  # x0, y0, x1, y1, text, block, line, word
+    words = page_words(page)  # x0, y0, x1, y1, text, block, line, word
     headers = [w for w in words if w[4].strip().upper() in COLUMN_HEADERS]
     # Gazette pages have two text columns, and a vote table that starts in one can
     # continue in the other without repeating its header row.
