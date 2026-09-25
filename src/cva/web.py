@@ -23,6 +23,10 @@ Endpoints:
     GET /api/legislators?q=
     GET /api/legislators/{id}
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
+
+Built frontend files under /assets/ have content hashes in their names and
+are cached for a year; API answers for five minutes, since they only change
+on a restart; index.html is revalidated on every load, so deploys show up.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
@@ -193,6 +198,35 @@ class Data:
         if lid is None or lid not in self.legislators:
             return {"id": None, "name": name, "photo_url": None, "party": None}
         return {**self.legislators[lid], "party": self.party_on(lid, chamber, date)}
+
+
+def cache_policy(path: str) -> str:
+    if path.startswith("/assets/"):
+        return "public, max-age=31536000, immutable"
+    if path.startswith("/pdf/"):
+        return "public, max-age=86400"
+    if path.startswith("/api/"):
+        return "public, max-age=300"
+    return "no-cache"
+
+
+class CacheHeaders:
+    """Adds Cache-Control, by path, to successful responses."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        policy = cache_policy(scope["path"]).encode()
+
+        async def send_with_policy(message):
+            if message["type"] == "http.response.start" and message["status"] in (200, 206):
+                message["headers"] = [*message.get("headers", []), (b"cache-control", policy)]
+            await send(message)
+
+        await self.app(scope, receive, send_with_policy)
 
 
 def summary(v: dict) -> dict:
@@ -389,7 +423,11 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
     ]
     if static:
         routes.append(Mount("/", StaticFiles(directory=static, html=True)))
-    return Starlette(routes=routes, exception_handlers={HTTPException: error})
+    return Starlette(
+        routes=routes,
+        middleware=[Middleware(CacheHeaders)],
+        exception_handlers={HTTPException: error},
+    )
 
 
 def main(argv: list[str] | None = None):

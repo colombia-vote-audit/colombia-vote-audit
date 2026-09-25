@@ -149,3 +149,15 @@ def test_refuses_a_database_without_the_attendance_tables(votes_db):
     sqlite3.connect(votes_db).execute("DROP TABLE legislator_terms")
     with pytest.raises(SystemExit, match="cva.attendance"):
         web.Data(votes_db)
+
+
+def test_cache_headers_follow_how_often_things_change(votes_db, tmp_path):
+    static = tmp_path / "dist"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text("<html></html>")
+    (static / "assets" / "index-abc123.js").write_text("")
+    client = TestClient(web.create_app(votes_db, static=static))
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert "immutable" in client.get("/assets/index-abc123.js").headers["cache-control"]
+    assert client.get("/api/votes").headers["cache-control"] == "public, max-age=300"
+    assert "cache-control" not in client.get("/api/votes/999").headers
