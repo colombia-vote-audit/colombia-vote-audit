@@ -566,16 +566,16 @@ def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_R
     return best, None
 
 
-def numbers(s):
-    """Numbers in a title, ignoring leading zeros, with 2-digit years also as 4-digit
-    ("PLE.083/25" and "083 DEL 2025" share 83 and 2025)."""
-    out = set()
-    for n in re.findall(r"\d+", s or ""):
-        n = n.lstrip("0") or "0"
-        out.add(n)
-        if len(n) == 2:
-            out.add("20" + n)
-    return out
+BILL_ID = re.compile(r"(\d{1,4})\s*(?:/|\bdel?\b)\s*(\d{4}|\d{2})(?!\d)", re.I)
+
+
+def bill_ids(s):
+    """(number, year) of the bills named in a title or bill name, so that
+    "PLE.083/25", "PL.083/25C" and "Proyecto de Ley 83 de 2025" all give
+    (83, 2025). Bill numbers restart every year and differ by chamber, so a
+    number means nothing without its year."""
+    year = lambda y: int(y) if len(y) == 4 else 1900 + int(y) if int(y) >= 90 else 2000 + int(y)
+    return {(int(n), year(y)) for n, y in BILL_ID.findall(s or "")}
 
 
 def vote_side(value):
@@ -688,9 +688,9 @@ def attach_records(votes, records, pages=()):
     """Give votes their full name lists from scanned voting records.
 
     Each electronic record is paired with a manual record on the same page, or
-    on the next page with a shared number (the bill) in its title, and with the
-    text vote that begins up to four pages before it, preferring one whose bill
-    number appears in the record's title. The text still says what was voted;
+    on the next page naming the same bill, and with the text vote that begins up
+    to four pages before it, preferring one for the same bill (number and
+    year). The text still says what was voted;
     the records say who voted how. A record with no text vote becomes a vote of
     its own. Votes get verified = 1 when every record's rows match its printed
     totals, the electronic record's rows are numbered 1..N and every row is tied
@@ -700,7 +700,7 @@ def attach_records(votes, records, pages=()):
     # Work on copies: the same records are assembled again after rechecks.
     records = [{**r, "rows": list(r["rows"])} for r in records]
     electronic = sorted((r for r in records if r.get("kind") == "electronic"), key=lambda r: r["page"])
-    manual = [r for r in records if r.get("kind") == "manual"]
+    manual = sorted((r for r in records if r.get("kind") == "manual"), key=lambda r: r["page"])
     # Join records that run onto the following pages. The rows there come
     # without totals (0-0) and continue the numbering (44 after 43); the model
     # sometimes repeats the title on them, so the title can't be relied on. The
@@ -743,16 +743,29 @@ def attach_records(votes, records, pages=()):
     electronic = sorted(heads, key=lambda r: r["page"])
     used_votes, used_manual, extra = set(), set(), []
     for e in electronic:
-        next_page_has_own = any(o["page"] == e["page"] + 1 for o in electronic)  # continuations are gone by now
-        pair = [i for i, m in enumerate(manual) if i not in used_manual and (
-            m["page"] == e["page"] or (m["page"] == e["page"] + 1 and (
-                numbers(m.get("title")) & numbers(e.get("title")) or not next_page_has_own)))]
-        parts = [e] + ([manual[pair[0]]] if pair else [])
-        used_manual.update(pair[:1])
+        after = e["pages"][-1] + 1
+        next_page_has_own = any(o["page"] == after for o in electronic)
+
+        def manual_fit(m):
+            """How well a manual record goes with e, lower is better, or None.
+            One on e's own pages always fits: the House prints them together,
+            and titles are sometimes misread ("36 DEL 2024" for 336). One on the
+            next page fits if it names the same bill, or if no other record
+            starts there. Same bill first, then same page."""
+            ids = bill_ids(m["title"]), bill_ids(e["title"])
+            same_bill = bool(ids[0] & ids[1])
+            if m["page"] in e["pages"] or (m["page"] == after and (
+                    same_bill or not next_page_has_own and not (all(ids) and not same_bill))):
+                return (not same_bill, m["page"] not in e["pages"], m["page"])
+            return None
+
+        fits = sorted((manual_fit(m), i) for i, m in enumerate(manual) if i not in used_manual and manual_fit(m))
+        parts = [e] + ([manual[fits[0][1]]] if fits else [])
+        used_manual.update(i for _, i in fits[:1])
         cands = [i for i, v in enumerate(votes) if i not in used_votes and page_of(v) is not None
                  and 0 <= e["page"] - page_of(v) <= 4]
         best = max(cands, default=None, key=lambda i: (
-            bool(numbers(votes[i].get("bill_name")) & numbers(e.get("title"))), page_of(votes[i])))
+            bool(bill_ids(votes[i].get("bill_name")) & bill_ids(e["title"])), page_of(votes[i])))
         problems = ([p for p in [*map(check_record, parts), check_row_numbers(e)] if p]
                     + e.get("stray", []) + check_members(parts))
         # The announced result is only a note: the secretary sometimes misstates
