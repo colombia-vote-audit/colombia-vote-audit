@@ -29,6 +29,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -522,19 +523,28 @@ def clean_record(record):
             "date": str(record.get("date") or ""), "totals": {"si": as_int(totals.get("si")), "no": as_int(totals.get("no"))}}
 
 
+# PyMuPDF isn't thread-safe, and record pages are rendered from worker threads.
+PDF_LOCK = threading.Lock()
+
+
+def render_page(path, page_no, dpi):
+    """PNG bytes of a 1-based page."""
+    with PDF_LOCK, pymupdf.open(path) as doc:
+        return doc[page_no - 1].get_pixmap(dpi=dpi).tobytes("png")
+
+
 def extract_record_page(meta, path, page_no, members, dpis=(RECORD_DPI, RECORD_RETRY_DPI)):
     """Voting records the model read from one page image, and the error if the
     call failed. A page read as having no records, or whose electronic record
     skips a row number, is read once more at a higher resolution, keeping the
     better reading. Pages only get here when they sit next to a House result, so
     "no records" is more likely a misreading than a real answer."""
-    page = pymupdf.open(path)[page_no - 1]
     user = (f"GACETA: {json.dumps(meta, ensure_ascii=False)}\nPAGE: {page_no}\n\n"
             f"MEMBERS:\n{members_text(members) or '(not available)'}")
     best = None
     try:
         for dpi in dpis:
-            out = call_llm(RECORD_PROMPT, user, page.get_pixmap(dpi=dpi).tobytes("png"), VISION_MODEL)
+            out = call_llm(RECORD_PROMPT, user, render_page(path, page_no, dpi), VISION_MODEL)
             found = out.get("records")
             records = [read_rows(clean_record(r), members) for r in found if isinstance(r, dict)] if isinstance(found, list) else []
             records = [r for r in records if r["rows"]]
