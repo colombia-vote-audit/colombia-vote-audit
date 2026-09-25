@@ -11,6 +11,7 @@ export interface Counts {
   no: number;
   abstain: number;
   absent: number | null; // null where absences can't be checked
+  absent_in_session: number | null; // of those, how many voted on something else that day
 }
 
 export interface VoteSummary {
@@ -34,6 +35,7 @@ export interface Person {
   name: string;
   photo_url: string | null;
   party: string | null;
+  in_session?: boolean; // for members who didn't vote: whether they voted on something else that day
 }
 
 export interface VoteDetail extends VoteSummary {
@@ -62,8 +64,8 @@ export interface LegislatorSummary {
 
 export interface LegislatorDetail extends LegislatorSummary {
   service: { chamber: string; term_start: string | null; first_vote: string; last_vote: string; votes: number }[];
-  totals: Record<Position, number>;
-  record: (VoteSummary & { position: Position; party_then: string | null })[];
+  totals: Record<Position, number> & { absent_in_session: number };
+  record: (VoteSummary & { position: Position; in_session: boolean | null; party_then: string | null })[];
 }
 
 export interface Stats {

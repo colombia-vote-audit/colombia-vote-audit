@@ -61,6 +61,10 @@ const en = {
   checkFailedBadge: "Check failed",
   fromText: "Names read from the gazette text. They weren't checked against a voting record.",
   noneRecorded: "None recorded",
+  inSessionCount: (n: number | string) => `${n} in session`,
+  absentInSession: "Voted on something else that day",
+  absentAway: "No vote recorded that day",
+  inSessionThatDay: "In session that day",
   noAbstain:
     "The voting records have only Yes and No: members can't abstain, only be excused over a conflict of interest (an impedimento).",
   absentUnknown:
@@ -68,7 +72,7 @@ const en = {
   inOffice: (a: string, b: string) => `In office per recorded votes ${a} → ${b}`,
   votesCast: "Votes cast",
   totalsNote:
-    "Counts cover the votes in this database only. “Didn't vote” is known only for checked plenary votes read from scanned voting records. Pick a count to list only those votes.",
+    "Counts cover the votes in this database only. “Didn't vote” is known only for checked plenary votes read from scanned voting records; “in session” means they voted on something else that day. Pick a count to list only those votes.",
   votingRecord: "Voting record",
   showAll: "show all",
   partyThen: (p: string) => `Party then: ${p}`,
@@ -134,6 +138,10 @@ const es: Dict = {
   checkFailedBadge: "No verificado",
   fromText: "Nombres leídos del texto de la gaceta. No se verificaron contra un registro de votación.",
   noneRecorded: "Ninguno registrado",
+  inSessionCount: (n) => `${n} en sesión`,
+  absentInSession: "Votó en otras votaciones ese día",
+  absentAway: "Sin votos registrados ese día",
+  inSessionThatDay: "En sesión ese día",
   noAbstain:
     "Los registros de votación solo tienen Sí y No: los congresistas no pueden abstenerse, solo ser excusados por conflicto de interés (un impedimento).",
   absentUnknown:
@@ -141,7 +149,7 @@ const es: Dict = {
   inOffice: (a, b) => `En el cargo según votos registrados ${a} → ${b}`,
   votesCast: "Votos emitidos",
   totalsNote:
-    "Los conteos cubren solo las votaciones de esta base de datos. “No votó” solo se sabe para votaciones de plenaria verificadas, leídas de registros de votación escaneados. Elija un conteo para ver solo esas votaciones.",
+    "Los conteos cubren solo las votaciones de esta base de datos. “No votó” solo se sabe para votaciones de plenaria verificadas, leídas de registros de votación escaneados; “en sesión” significa que votó en otras votaciones ese día. Elija un conteo para ver solo esas votaciones.",
   votingRecord: "Historial de votaciones",
   showAll: "mostrar todo",
   partyThen: (p) => `Partido entonces: ${p}`,

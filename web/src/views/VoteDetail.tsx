@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { api, type Person, type Position, type VoteDetail as Vote } from "../api";
 import { BackLink, CheckBadge, ResultBadge, Status, useFetch, useTitle, type Back } from "../common";
 import { useI18n } from "../i18n";
@@ -49,20 +50,32 @@ function Body({ v }: { v: Vote }) {
         {shown.map((p) => (
           <span key={p} className={`c-${p}`}>
             <b>{count(p)}</b> {t.position[p]}
+            {p === "absent" && <small> ({t.inSessionCount(v.counts.absent_in_session ?? 0)})</small>}
           </span>
         ))}
       </div>
       <div className="bar">
-        {shown.map((p) => (
-          <span key={p} className={`bg-${p}`} style={{ width: `${(100 * count(p)) / all}%` }} />
-        ))}
+        {shown.map((p) =>
+          p === "absent" ? (
+            <Fragment key={p}>
+              <span className="bg-absent-in" style={{ width: `${(100 * (v.counts.absent_in_session ?? 0)) / all}%` }} />
+              <span className="bg-absent" style={{ width: `${(100 * (count(p) - (v.counts.absent_in_session ?? 0))) / all}%` }} />
+            </Fragment>
+          ) : (
+            <span key={p} className={`bg-${p}`} style={{ width: `${(100 * count(p)) / all}%` }} />
+          ),
+        )}
       </div>
 
       <Source v={v} />
 
       <div className={`columns n${shown.length}`}>
         {shown.map((p) => (
-          <Column key={p} position={p} people={v.groups[p] ?? []} />
+          p === "absent" ? (
+            <AbsentColumn key={p} people={v.groups.absent ?? []} />
+          ) : (
+            <Column key={p} position={p} people={v.groups[p] ?? []} />
+          )
         ))}
       </div>
       <p className="note">
@@ -104,18 +117,48 @@ function Column({ position, people }: { position: Position; people: Person[] }) 
       <h3>
         {t.position[position]} <span>{people.length}</span>
       </h3>
-      {people.length ? (
-        <ul>
-          {people.map((p, i) => (
-            <li key={i}>
-              {p.id ? <a href={href(`/legislator/${p.id}`)}>{p.name}</a> : <span>{p.name}</span>}
-              {p.party && <small>{p.party}</small>}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="muted">{t.noneRecorded}</p>
+      {people.length ? <People people={people} /> : <p className="muted">{t.noneRecorded}</p>}
+    </div>
+  );
+}
+
+// Members who didn't vote, split by whether they voted on something else that day.
+function AbsentColumn({ people }: { people: Person[] }) {
+  const { t } = useI18n();
+  const groups: [string, Person[]][] = [
+    [t.absentInSession, people.filter((p) => p.in_session)],
+    [t.absentAway, people.filter((p) => !p.in_session)],
+  ];
+  return (
+    <div className="column c-absent">
+      <h3>
+        {t.position.absent} <span>{people.length}</span>
+      </h3>
+      {!people.length && <p className="muted">{t.noneRecorded}</p>}
+      {groups.map(
+        ([label, group]) =>
+          group.length > 0 && (
+            <Fragment key={label}>
+              <h4>
+                {label} <span>{group.length}</span>
+              </h4>
+              <People people={group} />
+            </Fragment>
+          ),
       )}
     </div>
+  );
+}
+
+function People({ people }: { people: Person[] }) {
+  return (
+    <ul>
+      {people.map((p, i) => (
+        <li key={i}>
+          {p.id ? <a href={href(`/legislator/${p.id}`)}>{p.name}</a> : <span>{p.name}</span>}
+          {p.party && <small>{p.party}</small>}
+        </li>
+      ))}
+    </ul>
   );
 }

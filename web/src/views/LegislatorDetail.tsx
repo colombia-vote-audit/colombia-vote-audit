@@ -88,6 +88,7 @@ function Body({ p }: { p: Legislator }) {
             >
               <b>{num(n)}</b>
               <span>{label}</span>
+              {kind === "absent" && <small>{t.inSessionCount(num(p.totals.absent_in_session))}</small>}
             </button>
           );
         })}
@@ -111,7 +112,12 @@ function Body({ p }: { p: Legislator }) {
               <span className="main">
                 <strong>{r.subject ?? r.bill_name ?? `#${r.id}`}</strong>
                 <small>
-                  {[r.chamber, r.party_then && t.partyThen(r.party_then), t.voteResult(t.result[r.result])]
+                  {[
+                    r.chamber,
+                    r.party_then && t.partyThen(r.party_then),
+                    t.voteResult(t.result[r.result]),
+                    r.in_session && t.inSessionThatDay,
+                  ]
                     .filter(Boolean)
                     .join(" · ")}
                 </small>
