@@ -179,8 +179,8 @@ A record's rows can continue from the previous page without its title or totals:
 # Some gazettes embed fonts whose character codes are 29 below the real ones
 # ("$&7$" for "ACTA", \x03 for a space), with accented letters shifted the same
 # way from the Mac Roman positions ("p" for "é"). They show up as the shifted
-# space and digits, which no normal text contains.
-CONTROL = re.compile(r"[\x03\x13-\x1c]")
+# space, comma, hyphen, period and digits, which no normal text contains.
+CONTROL = re.compile(r"[\x03\x0f-\x11\x13-\x1c]")
 
 
 def unscramble(text):
@@ -196,6 +196,33 @@ def unscramble(text):
     return "".join(out)
 
 
+# Another variant shifts only some characters: capitals, digits and symbols
+# (and "ó" as "y", "fi" as "¿"), leaving lowercase letters as they are, so "con
+# la proposición" comes out as "coQ la pUoposiciyQ" and "Blel Scaff Nadia" as
+# "%lel 6ca൵ 1adia". "Q" (n) or "U" (r) right after a lowercase letter marks
+# such a span; brand names ("MinTIC", "WhatsApp") don't use those.
+PARTLY_SHIFTED = re.compile(r"[a-záéíóúñ][QU]")
+# A fully shifted word in a span of its own: capitals with a shifted accented
+# letter between them ("DUWtFXOR" for "artículo", "$GLFLyQHVH" for "Adiciónese").
+SHIFTED_ALONE = re.compile(r"^[$-Z]+[a-z~][$-Z]+\S*$")
+SHIFTED_WORD = re.compile(r"^[$-=][a-záéíóúñ]|[a-záéíóúñ][A-Z]")
+
+
+def unshift_word(word):
+    """A word from a partly shifted span, decoded if it looks shifted."""
+    if not SHIFTED_WORD.search(word):
+        return word
+    out = []
+    for i, c in enumerate(word):
+        if 0x24 <= ord(c) <= 0x5d:
+            out.append(chr(ord(c) + 29))
+        elif c == "y" and i > 0:
+            out.append("ó")
+        else:
+            out.append({"¿": "fi", "൵": "ff"}.get(c, c))
+    return "".join(out)
+
+
 def page_words(page):
     """Words like page.get_text("words") gives them: x0, y0, x1, y1, text,
     block, line, word. On pages with text in a shifted font, the words are
@@ -203,15 +230,26 @@ def page_words(page):
     drops the shifted digits. The same font name can carry shifted and normal
     text, so only spans with a shifted space or digit are decoded; a lone
     shifted word in a span of its own stays as it is."""
-    if not CONTROL.search(page.get_text()):
+    text = page.get_text()
+    if not CONTROL.search(text) and not PARTLY_SHIFTED.search(text):
         return page.get_text("words")
-    words = []
+    words, page_shifted = [], bool(CONTROL.search(text))
     for b_no, block in enumerate(page.get_text("rawdict")["blocks"]):
         for l_no, line in enumerate(block.get("lines", [])):
             chars = []
             for span in line["spans"]:
-                shifted = CONTROL.search("".join(c["c"] for c in span["chars"]))
-                chars += [(unscramble(c["c"]) if shifted else c["c"], c["bbox"]) for c in span["chars"]]
+                text = "".join(c["c"] for c in span["chars"])
+                if CONTROL.search(text) or (page_shifted and SHIFTED_ALONE.match(text.strip())):
+                    chars += [(unscramble(c["c"]), c["bbox"]) for c in span["chars"]]
+                elif PARTLY_SHIFTED.search(text):
+                    # decode word by word, keeping each character's box
+                    for m in re.finditer(r"\S+|\s+", text):
+                        fixed = unshift_word(m.group()) if m.group().strip() else m.group()
+                        boxes = [c["bbox"] for c in span["chars"][m.start():m.end()]]
+                        chars += list(zip(fixed, boxes)) if len(fixed) == len(boxes) else [
+                            (fixed, (boxes[0][0], boxes[0][1], boxes[-1][2], boxes[-1][3]))]
+                else:  # control characters PyMuPDF's words would have dropped
+                    chars += [(c["c"], c["bbox"]) for c in span["chars"] if c["c"] >= " "]
             word = []
             for ch, box in chars + [(" ", None)]:
                 if ch.strip():
