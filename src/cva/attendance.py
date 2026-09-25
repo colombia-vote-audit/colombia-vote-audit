@@ -20,11 +20,12 @@ it, rebuilt from scratch on every run:
 - vote_attendance: for each verified plenary vote, the date used and where it came
   from, and how many legislators were eligible, voted and were absent.
 
-Only votes read from scanned plenary voting records (source = 'record') with
-verified = 1 get absences: their names add up to the printed totals and every
-row is tied to a legislator, so a misread row can't make someone who voted look
-absent. Everyone in the chamber is expected to vote in a plenary; committee
-votes are left out because committee membership isn't known.
+Only votes read from scanned voting records (source = 'record') with
+verified = 1 and flagged plenary (is_committee = 0) get absences: their names
+add up to the printed totals and every row is tied to a legislator, so a
+misread row can't make someone who voted look absent. Everyone in the chamber
+is expected to vote in a plenary; committee votes are left out because
+committee membership isn't known.
 
 A vote without a session date takes the date of the other votes in its gazette
 when they all share one (a House plenary acta records a single session);
@@ -164,7 +165,8 @@ def build(votes: sqlite3.Connection, cva: sqlite3.Connection) -> dict:
 
     absences, attendance = [], []
     for (vid,) in votes.execute(
-        "SELECT id FROM votes WHERE verified = 1 AND source = 'record' ORDER BY id"
+        "SELECT id FROM votes"
+        " WHERE verified = 1 AND source = 'record' AND is_committee = 0 ORDER BY id"
     ):
         date, source = dates[vid]
         if not date:

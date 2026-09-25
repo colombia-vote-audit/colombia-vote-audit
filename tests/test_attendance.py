@@ -27,14 +27,15 @@ def votes_db(tmp_path, votes, records):
         CREATE TABLE documents (id INTEGER PRIMARY KEY, chamber TEXT);
         CREATE TABLE votes (id INTEGER PRIMARY KEY, document_id INTEGER,
                             session_date TEXT, verified INTEGER,
-                            source TEXT NOT NULL DEFAULT 'record');
+                            source TEXT NOT NULL DEFAULT 'record',
+                            is_committee INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE vote_records (vote_id INTEGER, legislator TEXT, vote TEXT,
                                    legislator_id INTEGER);
         INSERT INTO documents VALUES (1, 'Cámara'), (2, 'Cámara'), (3, 'Cámara');
         """
     )
     conn.executemany(
-        "INSERT INTO votes VALUES (?, ?, ?, ?, ?)", [(*v, "record")[:5] for v in votes]
+        "INSERT INTO votes VALUES (?, ?, ?, ?, ?, ?)", [(*v, "record", 0)[:6] for v in votes]
     )
     conn.executemany(
         "INSERT INTO vote_records VALUES (?, '', 'yes', ?)",
@@ -115,6 +116,21 @@ def test_only_plenary_records_get_absences(tmp_path):
     votes = votes_db(
         tmp_path,
         [(1, 1, "2024-10-01", 1), (2, 1, "2024-10-01", 1, "text"), (3, 2, "2024-11-01", 1)],
+        {1: [1, 2, 3], 2: [1], 3: [1, 2, 3]},
+    )
+    attendance.build(votes, pipeline_db())
+    assert votes.execute("SELECT vote_id FROM vote_attendance ORDER BY 1").fetchall() == [
+        (1,),
+        (3,),
+    ]
+    assert votes.execute("SELECT count(*) FROM vote_absences").fetchone()[0] == 0
+
+
+def test_committee_records_get_no_absences(tmp_path):
+    # A committee's record names few members; the rest of the chamber isn't absent.
+    votes = votes_db(
+        tmp_path,
+        [(1, 1, "2024-10-01", 1), (2, 2, "2024-11-01", 1, "record", 1), (3, 3, "2025-01-01", 1)],
         {1: [1, 2, 3], 2: [1], 3: [1, 2, 3]},
     )
     attendance.build(votes, pipeline_db())
