@@ -9,7 +9,10 @@ CAMARA = "Cámara de Representantes"
 def pipeline_db():
     cva = db.connect(":memory:")
     for lid, name in [(1, "Ana Pérez"), (2, "Beto Ruiz"), (3, "Carla Díaz")]:
-        cva.execute("INSERT INTO legislators (id, name) VALUES (?, ?)", (lid, name))
+        cva.execute(
+            "INSERT INTO legislators (id, name, photo_url) VALUES (?, ?, ?)",
+            (lid, name, f"https://example.org/{lid}.jpg" if lid != 3 else None),
+        )
         cva.execute(
             "INSERT INTO legislator_terms VALUES (?, ?, '2022-07-20', '2026-07-19', NULL, ?, '')",
             (lid, CAMARA, json.dumps({})),
@@ -120,3 +123,12 @@ def test_only_plenary_records_get_absences(tmp_path):
         (3,),
     ]
     assert votes.execute("SELECT count(*) FROM vote_absences").fetchone()[0] == 0
+
+
+def test_legislators_referenced_by_votes_get_name_and_photo(tmp_path):
+    votes = votes_db(tmp_path, [(1, 1, "2024-10-01", 1)], {1: [1, 3]})
+    attendance.build(votes, pipeline_db())
+    assert votes.execute("SELECT * FROM legislators ORDER BY id").fetchall() == [
+        (1, "Ana Pérez", "https://example.org/1.jpg"),
+        (3, "Carla Díaz", None),
+    ]
