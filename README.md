@@ -80,6 +80,27 @@ It writes these files to `data/sample/`:
 uv run cva sample-fetch samples/manifest.json
 ```
 
+## Attendance
+
+After extraction, a second stage works out each legislator's time in office and who didn't vote:
+
+```sh
+uv run python -m cva.attendance votes.db   # reads data/cva.db read-only; --cva to change
+```
+
+It adds three tables to the votes database and rebuilds them on every run:
+- `legislator_service`: each legislator's time in office per chamber and term, from their first recorded vote to their last. A replacement's window starts when they begin voting, and the window of the member they replaced ends at that member's last vote.
+- `vote_absences`: for each verified plenary vote, the legislators whose window covers the vote's date but who aren't on its record.
+- `vote_attendance`: for each of those votes, the date used and where it came from, and how many legislators were eligible, voted and were absent.
+
+Absences are only computed for votes read from scanned plenary voting records with `verified = 1`. On those, every row is tied to a legislator and the names add up to the printed totals, so a misread row can't make a voter look absent. Committee votes are left out because committee membership isn't known. Senate votes and House votes taken from the text are left out because they can't be verified.
+
+A vote with no session date takes the date of the other votes in its gazette, since a House plenary acta records a single session. If none of them has a date, the vote is skipped.
+
+Limits:
+- The records list only members who voted, so an absence means the member was either not there or in the chamber without voting.
+- Nobody can be marked absent before their first recorded vote or after their last. Absences at the first and last sessions in a dataset are undercounted.
+
 ## Deployment
 
 `flake.nix` exports `nixosModules.default`:
