@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections import deque
+from collections import Counter, deque
 import urllib.error
 import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
@@ -855,12 +855,16 @@ def attach_records(votes, records, pages=()):
                   "legislator_ids": {row["name"]: row["legislator_id"] for r in parts for row in r["rows"]
                                      if row["legislator_id"] is not None},
                   "source": "record", "verified": int(not problems), "check_note": "; ".join(problems + notes) or None}
+        day = re.match(r"(\d{2})/(\d{2})/(\d{4})", e.get("date") or "")
+        day = f"{day.group(3)}-{day.group(2)}-{day.group(1)}" if day else None
         if best is not None:
             used_votes.add(best)
             votes[best].update(filled)
+            # The record prints when the vote started; the text vote may have no date.
+            if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(votes[best].get("session_date") or "")):
+                votes[best]["session_date"] = day
         else:
-            day = re.match(r"(\d{2})/(\d{2})/(\d{4})", e.get("date") or "")
-            extra.append({"session_date": f"{day.group(3)}-{day.group(2)}-{day.group(1)}" if day else None,
+            extra.append({"session_date": day,
                           "bill_name": e.get("title"), "subject": e.get("title"), "result": "unknown",
                           "page": e["page"], **filled})
     # A House plenary vote whose result counts electronic votes but got no record
@@ -873,6 +877,30 @@ def attach_records(votes, records, pages=()):
             v.update(verified=0, check_note="the text counts electronic votes, but no voting record was read for "
                                             "this vote, so only members who voted by hand are listed")
     return votes + extra
+
+
+def fill_session_dates(votes, pages):
+    """Give votes the model left without a session date (it often does when
+    the acta's header isn't in the chunk it read) the date of the other votes
+    in the same acta, the stretch of pages after one "ACTA NÚMERO n DE yyyy"
+    header. Failing that, the gazette's date if all its dated votes agree.
+    Gazettes can hold actas of several sessions, so nothing else is guessed."""
+    dated = lambda v: isinstance(v.get("session_date"), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["session_date"])
+    starts = [i + 1 for i, t in enumerate(pages) if ACTA_RE.search(t)]
+    acta = lambda v: max((s for s in starts if s <= (page_of(v) or 0)), default=0)
+    by_acta, all_dates = {}, Counter()
+    for v in votes:
+        if dated(v):
+            by_acta.setdefault(acta(v), Counter())[v["session_date"]] += 1
+            all_dates[v["session_date"]] += 1
+    for v in votes:
+        if not dated(v):
+            same = by_acta.get(acta(v))
+            if same and len(same) == 1:
+                v["session_date"] = next(iter(same))
+            elif not same and len(all_dates) == 1:
+                v["session_date"] = next(iter(all_dates))
+    return votes
 
 
 def pages_to_recheck(doc, votes):
@@ -1127,8 +1155,8 @@ def main():
                 doc["pending"] += 1
             if doc["pending"]:
                 return None
-        return save_document(conn, doc, with_rechecks(doc, doc["votes"], doc["retry"])
-                             if doc["retry"] else doc["votes"])
+        votes = with_rechecks(doc, doc["votes"], doc["retry"]) if doc["retry"] else doc["votes"]
+        return save_document(conn, doc, fill_session_dates(votes, doc["page_texts"]))
 
     try:
         while True:
