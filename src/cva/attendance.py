@@ -16,9 +16,11 @@ it, rebuilt from scratch on every run:
 - vote_absences: for each verified plenary vote, the legislators whose window in that
   chamber covers the vote's date but who are not on the vote's record. The
   records list only members who voted, so this means absent, or in the chamber
-  without voting.
+  without voting. in_session marks those who voted on another of these votes
+  in the same chamber that day, so were in session but skipped this one.
 - vote_attendance: for each verified plenary vote, the date used and where it came
-  from, and how many legislators were eligible, voted and were absent.
+  from, and how many legislators were eligible, voted, were absent, and were
+  absent but in session.
 
 Only votes read from scanned voting records (source = 'record') with
 verified = 1 and flagged plenary (is_committee = 0) get absences: their names
@@ -77,6 +79,8 @@ CREATE TABLE vote_absences (
     vote_id       INTEGER NOT NULL REFERENCES votes (id) ON DELETE CASCADE,
     legislator_id INTEGER NOT NULL,
     legislator    TEXT NOT NULL,      -- name from the pipeline database
+    in_session    INTEGER NOT NULL,   -- 1 if they voted on another checked plenary vote in
+                                      -- the same chamber that day
     UNIQUE (vote_id, legislator_id)
 );
 CREATE INDEX vote_absences_legislator ON vote_absences (legislator_id);
@@ -87,7 +91,8 @@ CREATE TABLE vote_attendance (
     date_source  TEXT NOT NULL,       -- vote | gazette | none
     eligible     INTEGER NOT NULL,    -- legislators whose window covers the date
     voted        INTEGER NOT NULL,
-    absent       INTEGER NOT NULL
+    absent       INTEGER NOT NULL,
+    absent_in_session INTEGER NOT NULL  -- absent, but voted on another of these votes that day
 );
 """
 
@@ -163,19 +168,31 @@ def build(votes: sqlite3.Connection, cva: sqlite3.Connection) -> dict:
             if ch == chamber and first <= date <= last and term == term_of(terms[lid], date)
         }
 
+    checked = [
+        vid
+        for (vid,) in votes.execute(
+            "SELECT id FROM votes WHERE verified = 1 AND source = 'record' AND is_committee = 0"
+            " ORDER BY id"
+        )
+    ]
+    # Who voted on at least one checked vote, per chamber and day.
+    in_session = defaultdict(set)
+    for vid in checked:
+        if dates[vid][0]:
+            in_session[chamber_of[vid], dates[vid][0]] |= voters[vid]
+
     absences, attendance = [], []
-    for (vid,) in votes.execute(
-        "SELECT id FROM votes"
-        " WHERE verified = 1 AND source = 'record' AND is_committee = 0 ORDER BY id"
-    ):
+    for vid in checked:
         date, source = dates[vid]
         if not date:
-            attendance.append((vid, None, source, 0, len(voters[vid]), 0))
+            attendance.append((vid, None, source, 0, len(voters[vid]), 0, 0))
             continue
         pool = eligible(chamber_of[vid], date)
         missing = sorted(pool - voters[vid], key=lambda lid: names.get(lid, ""))
-        absences += [(vid, lid, names.get(lid, str(lid))) for lid in missing]
-        attendance.append((vid, date, source, len(pool), len(voters[vid]), len(missing)))
+        present = in_session[chamber_of[vid], date]
+        absences += [(vid, lid, names.get(lid, str(lid)), int(lid in present)) for lid in missing]
+        skipped = sum(lid in present for lid in missing)
+        attendance.append((vid, date, source, len(pool), len(voters[vid]), len(missing), skipped))
 
     with votes:
         votes.executescript(SCHEMA)
@@ -197,8 +214,8 @@ def build(votes: sqlite3.Connection, cva: sqlite3.Connection) -> dict:
             "INSERT INTO legislator_service VALUES (?, ?, ?, ?, ?, ?)",
             [(lid, ch, term, *w) for (lid, ch, term), w in windows.items()],
         )
-        votes.executemany("INSERT INTO vote_absences VALUES (?, ?, ?)", absences)
-        votes.executemany("INSERT INTO vote_attendance VALUES (?, ?, ?, ?, ?, ?)", attendance)
+        votes.executemany("INSERT INTO vote_absences VALUES (?, ?, ?, ?)", absences)
+        votes.executemany("INSERT INTO vote_attendance VALUES (?, ?, ?, ?, ?, ?, ?)", attendance)
     return {
         "legislators": len(legislators),
         "service_windows": len(windows),
@@ -206,6 +223,7 @@ def build(votes: sqlite3.Connection, cva: sqlite3.Connection) -> dict:
         "undated_skipped": sum(1 for a in attendance if a[1] is None),
         "dated_from_gazette": sum(1 for a in attendance if a[2] == "gazette"),
         "absences": len(absences),
+        "absent_in_session": sum(a[3] for a in absences),
     }
 
 

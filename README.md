@@ -92,10 +92,10 @@ It adds five tables to the votes database and rebuilds them on every run:
 - `legislators`: the name and `photo_url` of every legislator the votes refer to, copied from the pipeline database. `photo_url` is a link to the image on Congreso Visible's server, for the frontend to use directly in an `<img>` tag. It is NULL when Congreso Visible has no photo.
 - `legislator_terms`: those legislators' chambers, terms and parties, copied from the pipeline database.
 - `legislator_service`: each legislator's time in office per chamber and term, from their first recorded vote to their last. A replacement's window starts when they begin voting, and the window of the member they replaced ends at that member's last vote.
-- `vote_absences`: for each verified plenary vote, the legislators whose window covers the vote's date but who aren't on its record.
-- `vote_attendance`: for each of those votes, the date used and where it came from, and how many legislators were eligible, voted and were absent.
+- `vote_absences`: for each verified plenary vote, the legislators whose window covers the vote's date but who aren't on its record. `in_session` marks those who voted on another checked vote in the same chamber that day: they were in session but skipped this one.
+- `vote_attendance`: for each of those votes, the date used and where it came from, and how many legislators were eligible, voted, were absent, and were absent but in session.
 
-Absences are only computed for votes read from scanned plenary voting records with `verified = 1`. On those, every row is tied to a legislator and the names add up to the printed totals, so a misread row can't make a voter look absent. Committee votes are left out because committee membership isn't known. Senate votes and House votes taken from the text are left out because they can't be verified.
+Absences are only computed for votes read from scanned voting records with `verified = 1` and `is_committee = 0`. On those, every row is tied to a legislator and the names add up to the printed totals, so a misread row can't make a voter look absent. Committee votes are left out because committee membership isn't known. Senate votes and House votes taken from the text are left out because they can't be verified.
 
 A vote with no session date takes the date of the other votes in its gazette, since a House plenary acta records a single session. If none of them has a date, the vote is skipped.
 

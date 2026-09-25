@@ -72,6 +72,7 @@ def test_absences_use_first_to_last_vote_windows(tmp_path):
         2,
         1,
         1,
+        0,
     )
 
 
@@ -139,6 +140,30 @@ def test_committee_records_get_no_absences(tmp_path):
         (3,),
     ]
     assert votes.execute("SELECT count(*) FROM vote_absences").fetchone()[0] == 0
+
+
+def test_absences_say_whether_the_member_voted_on_something_else_that_day(tmp_path):
+    # On 1 October Beto votes on the first vote and skips the second, while
+    # Carla, in office from September to November, votes on neither.
+    votes = votes_db(
+        tmp_path,
+        [
+            (1, 1, "2024-09-01", 1),
+            (2, 2, "2024-10-01", 1),
+            (3, 2, "2024-10-01", 1),
+            (4, 3, "2024-11-01", 1),
+        ],
+        {1: [1, 2, 3], 2: [1, 2], 3: [1], 4: [1, 2, 3]},
+    )
+    stats = attendance.build(votes, pipeline_db())
+    rows = votes.execute(
+        "SELECT vote_id, legislator_id, in_session FROM vote_absences ORDER BY 1, 2"
+    )
+    assert rows.fetchall() == [(2, 3, 0), (3, 2, 1), (3, 3, 0)]
+    assert votes.execute(
+        "SELECT vote_id, absent, absent_in_session FROM vote_attendance ORDER BY 1"
+    ).fetchall() == [(1, 0, 0), (2, 1, 0), (3, 2, 1), (4, 0, 0)]
+    assert stats["absent_in_session"] == 1
 
 
 def test_legislators_referenced_by_votes_get_name_and_photo(tmp_path):
