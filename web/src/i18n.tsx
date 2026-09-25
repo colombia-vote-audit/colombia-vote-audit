@@ -4,7 +4,7 @@ import type { DateSource, Position, VoteSummary, VoteType } from "./api";
 export type Lang = "en" | "es";
 
 const en = {
-  title: "Colombia Vote Audit",
+  title: "Quórum Colombia",
   tagline: "roll-call record",
   stats: (v: string, r: string, l: string) => `${v} votes · ${r} individual votes · ${l} legislators`,
   searchVotes: "Search votes by bill, topic or description",
@@ -198,7 +198,7 @@ const en = {
 type Dict = typeof en;
 
 const es: Dict = {
-  title: "Auditoría de Votos de Colombia",
+  title: "Quórum Colombia",
   tagline: "registro de votaciones nominales",
   stats: (v, r, l) => `${v} votaciones · ${r} votos individuales · ${l} congresistas`,
   searchVotes: "Buscar votaciones por proyecto, tema o descripción",

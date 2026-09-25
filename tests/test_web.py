@@ -167,7 +167,7 @@ def test_the_whole_database_can_be_downloaded_gzipped(client, votes_db):
     r = client.get("/download-db")
     assert r.headers["content-type"] == "application/gzip"
     assert re.fullmatch(
-        r'attachment; filename="colombia-vote-audit-\d{4}-\d{2}-\d{2}\.db\.gz"',
+        r'attachment; filename="quorum-colombia-\d{4}-\d{2}-\d{2}\.db\.gz"',
         r.headers["content-disposition"],
     )
     assert gzip.decompress(r.content) == votes_db.read_bytes()

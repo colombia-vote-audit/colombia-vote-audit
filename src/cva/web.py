@@ -308,7 +308,7 @@ def create_app(
     barcode_gz = gzip.compress(barcode_json, 6)
     limits = RateLimit(ASK_LIMIT, ASK_WINDOW)
     download_name = (
-        f"colombia-vote-audit-{datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()}.db"
+        f"quorum-colombia-{datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()}.db"
     )
     download = gzipped(votes_db, download_name)
     store = BlobStore(pdfs) if pdfs else None
