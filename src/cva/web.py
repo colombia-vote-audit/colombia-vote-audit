@@ -23,7 +23,7 @@ Endpoints:
     GET /api/legislators?q=
     GET /api/legislators/{id}
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
-    GET /download-db            the votes database itself, for anyone to use
+    GET /download-db            the votes database itself, gzipped, for anyone to use
 
 Built frontend files under /assets/ have content hashes in their names and
 are cached for a year; API answers for five minutes, since they only change
@@ -33,7 +33,9 @@ on a restart; index.html is revalidated on every load, so deploys show up.
 from __future__ import annotations
 
 import argparse
+import gzip
 import re
+import shutil
 import sqlite3
 import unicodedata
 from collections import defaultdict
@@ -222,6 +224,19 @@ class CacheHeaders:
         await self.app(scope, receive, send_with_policy)
 
 
+def gzipped(path: Path, name: str) -> Path:
+    """A gzip copy of the database for download, kept next to it and made
+    again when the database is newer. `name` is what gunzip -N restores."""
+    out = path.with_name(path.name + ".gz")
+    if not out.exists() or out.stat().st_mtime < path.stat().st_mtime:
+        tmp = out.with_name(out.name + ".tmp")
+        with open(path, "rb") as src, open(tmp, "wb") as raw:
+            with gzip.GzipFile(name, "wb", 9, raw) as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+        tmp.replace(out)
+    return out
+
+
 def summary(v: dict) -> dict:
     return {k: val for k, val in v.items() if not k.startswith("_")}
 
@@ -235,6 +250,10 @@ def query_int(request: Request, key: str, default: int, most: int) -> int:
 
 def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = None):
     data = Data(votes_db)
+    download_name = (
+        f"colombia-vote-audit-{datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()}.db"
+    )
+    download = gzipped(votes_db, download_name)
     store = BlobStore(pdfs) if pdfs else None
 
     def pdf_path(sha256: str) -> Path | None:
@@ -248,6 +267,7 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
                 "records": data.records,
                 "legislators": len(data.legislators),
                 "database_bytes": votes_db.stat().st_size,
+                "download_bytes": download.stat().st_size,
             }
         )
 
@@ -417,12 +437,7 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
 
     def download_db(request: Request):
         """The whole database the site reads, committee votes included."""
-        day = datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()
-        return FileResponse(
-            votes_db,
-            media_type="application/vnd.sqlite3",
-            filename=f"colombia-vote-audit-{day}.db",
-        )
+        return FileResponse(download, media_type="application/gzip", filename=f"{download_name}.gz")
 
     async def error(request: Request, exc: HTTPException):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)

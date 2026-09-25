@@ -80,8 +80,8 @@ const en = {
   showMore: "Show more",
   notFound: "Not found.",
   downloadDb: "Download the database",
-  downloadNote: (mb: string) =>
-    `SQLite, ${mb} MB: every vote, name and check behind this site, plus the committee votes it leaves out.`,
+  downloadNote: (gz: string, db: string) =>
+    `SQLite, gzipped: ${gz} MB (${db} MB unpacked). Every vote, name and check behind this site, plus the committee votes it leaves out.`,
   error: (m: string) => `Couldn't load: ${m}`,
 };
 
@@ -160,8 +160,8 @@ const es: Dict = {
   showMore: "Mostrar más",
   notFound: "No encontrado.",
   downloadDb: "Descargar la base de datos",
-  downloadNote: (mb) =>
-    `SQLite, ${mb} MB: todas las votaciones, nombres y verificaciones de este sitio, más las votaciones de comisión que no muestra.`,
+  downloadNote: (gz, db) =>
+    `SQLite comprimido con gzip: ${gz} MB (${db} MB descomprimido). Todas las votaciones, nombres y verificaciones de este sitio, más las votaciones de comisión que no muestra.`,
   error: (m) => `No se pudo cargar: ${m}`,
 };
 

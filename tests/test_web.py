@@ -1,3 +1,6 @@
+import gzip
+import os
+import re
 import sqlite3
 
 import pytest
@@ -160,11 +163,31 @@ def test_legislator_profile(client):
     assert [p["id"] for p in client.get("/api/legislators?q=diaz").json()["legislators"]] == [3]
 
 
-def test_the_whole_database_can_be_downloaded(client, votes_db):
+def test_the_whole_database_can_be_downloaded_gzipped(client, votes_db):
     r = client.get("/download-db")
-    assert r.headers["content-disposition"].startswith('attachment; filename="colombia-vote-audit-')
-    assert r.content == votes_db.read_bytes()
-    assert client.get("/api/stats").json()["database_bytes"] == len(r.content)
+    assert r.headers["content-type"] == "application/gzip"
+    assert re.fullmatch(
+        r'attachment; filename="colombia-vote-audit-\d{4}-\d{2}-\d{2}\.db\.gz"',
+        r.headers["content-disposition"],
+    )
+    assert gzip.decompress(r.content) == votes_db.read_bytes()
+    stats = client.get("/api/stats").json()
+    assert (stats["database_bytes"], stats["download_bytes"]) == (
+        votes_db.stat().st_size,
+        len(r.content),
+    )
+
+
+def test_the_download_is_made_again_when_the_database_changes(votes_db):
+    web.create_app(votes_db)
+    conn = sqlite3.connect(votes_db)
+    conn.execute("INSERT INTO legislators VALUES (9, 'Nueva Persona', NULL)")
+    conn.commit()
+    conn.close()
+    later = votes_db.stat().st_mtime + 10
+    os.utime(votes_db, (later, later))
+    client = TestClient(web.create_app(votes_db))
+    assert gzip.decompress(client.get("/download-db").content) == votes_db.read_bytes()
 
 
 def test_pdf_is_served_inline(client):

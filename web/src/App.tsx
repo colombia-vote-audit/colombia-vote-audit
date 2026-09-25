@@ -120,7 +120,14 @@ export function App() {
         <a href="/download-db" download>
           {t.downloadDb}
         </a>
-        {stats.data && <small>{t.downloadNote(num(Math.round(stats.data.database_bytes / 1e6)))}</small>}
+        {stats.data && (
+          <small>
+            {t.downloadNote(
+              num(Math.round(stats.data.download_bytes / 1e6)),
+              num(Math.round(stats.data.database_bytes / 1e6)),
+            )}
+          </small>
+        )}
       </footer>
     </div>
   );

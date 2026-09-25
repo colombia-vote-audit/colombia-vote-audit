@@ -12,3 +12,4 @@ __pycache__/
 *.db-shm
 /web/node_modules/
 /web/dist/
+*.db.gz
