@@ -102,6 +102,8 @@ class Data:
             raise SystemExit(
                 f"{path} has no {', '.join(sorted(missing))}; run python -m cva.attendance on it"
             )
+        if "in_session" not in {r[1] for r in conn.execute("PRAGMA table_info(vote_absences)")}:
+            raise SystemExit(f"{path} is from an older cva.attendance; run it again")
         self.legislators = {
             lid: {"id": lid, "name": name, "photo_url": photo}
             for lid, name, photo in conn.execute("SELECT id, name, photo_url FROM legislators")
@@ -133,6 +135,7 @@ class Data:
                    v.source, v.verified, d.chamber, d.publication_date, d.gaceta_number,
                    t.yes_count, t.no_count, t.abstain_count,
                    (SELECT count(*) FROM vote_absences a WHERE a.vote_id = v.id),
+                   (SELECT count(*) FROM vote_absences a WHERE a.vote_id = v.id AND a.in_session),
                    EXISTS (SELECT 1 FROM vote_attendance a WHERE a.vote_id = v.id)
             FROM votes v
             JOIN documents d ON d.id = v.document_id
@@ -146,7 +149,7 @@ class Data:
         votes = {}
         for (vid, doc, session, committee, subject, bill_name, bill_title, description,
              acta, result, vote_type, source, verified, chamber, published, gaceta,
-             yes, no, abstain, absent, has_attendance) in rows:  # fmt: skip
+             yes, no, abstain, absent, in_session, has_attendance) in rows:  # fmt: skip
             if committee == 1:
                 continue
             if date := iso_date(session):
@@ -176,6 +179,8 @@ class Data:
                     "abstain": abstain,
                     # Known only where the attendance stage could check the record.
                     "absent": absent if has_attendance else None,
+                    # Of those, how many voted on another checked vote that day.
+                    "absent_in_session": in_session if has_attendance else None,
                 },
                 "_search": fold(
                     " ".join(filter(None, [subject, bill_name, bill_title, description, acta]))
@@ -296,15 +301,17 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
                 (vid,),
             ).fetchall()
             absent = conn.execute(
-                "SELECT legislator_id, legislator FROM vote_absences WHERE vote_id = ?", (vid,)
+                "SELECT legislator_id, legislator, in_session FROM vote_absences WHERE vote_id = ?",
+                (vid,),
             ).fetchall()
         finally:
             conn.close()
         groups = {"yes": [], "no": [], "abstain": [], "absent": []}
         for name, position, lid in records:
             groups[position].append(data.person(lid, name, v["chamber"], v["date"]))
-        for lid, name in absent:
-            groups["absent"].append(data.person(lid, name, v["chamber"], v["date"]))
+        for lid, name, in_session in absent:
+            person = data.person(lid, name, v["chamber"], v["date"])
+            groups["absent"].append({**person, "in_session": bool(in_session)})
         for people in groups.values():
             people.sort(key=lambda p: fold(p["name"]))
         if v["counts"]["absent"] is None:
@@ -344,8 +351,9 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
         conn = data.connect()
         try:
             positions = conn.execute(
-                "SELECT vote_id, vote FROM vote_records WHERE legislator_id = ?"
-                " UNION ALL SELECT vote_id, 'absent' FROM vote_absences WHERE legislator_id = ?",
+                "SELECT vote_id, vote, NULL FROM vote_records WHERE legislator_id = ?"
+                " UNION ALL SELECT vote_id, 'absent', in_session FROM vote_absences"
+                " WHERE legislator_id = ?",
                 (lid, lid),
             ).fetchall()
             service = [
@@ -365,16 +373,18 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
         finally:
             conn.close()
         record = []
-        totals = {"yes": 0, "no": 0, "abstain": 0, "absent": 0}
-        for vid, position in positions:
+        totals = {"yes": 0, "no": 0, "abstain": 0, "absent": 0, "absent_in_session": 0}
+        for vid, position, in_session in positions:
             if vid not in data.votes:  # a committee vote
                 continue
             v = data.votes[vid]
             totals[position] += 1
+            totals["absent_in_session"] += bool(in_session)
             record.append(
                 {
                     **summary(v),
                     "position": position,
+                    "in_session": None if in_session is None else bool(in_session),
                     "party_then": data.party_on(lid, v["chamber"], v["date"]),
                 }
             )

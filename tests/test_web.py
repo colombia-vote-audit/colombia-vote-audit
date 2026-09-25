@@ -25,10 +25,11 @@ CREATE TABLE legislator_terms (legislator_id INTEGER, chamber TEXT, start_date T
                                end_date TEXT, party TEXT);
 CREATE TABLE legislator_service (legislator_id INTEGER, chamber TEXT, term_start TEXT,
                                  first_vote TEXT, last_vote TEXT, votes INTEGER);
-CREATE TABLE vote_absences (vote_id INTEGER, legislator_id INTEGER, legislator TEXT);
+CREATE TABLE vote_absences (vote_id INTEGER, legislator_id INTEGER, legislator TEXT,
+                            in_session INTEGER);
 CREATE TABLE vote_attendance (vote_id INTEGER PRIMARY KEY, session_date TEXT,
                               date_source TEXT, eligible INTEGER, voted INTEGER,
-                              absent INTEGER);
+                              absent INTEGER, absent_in_session INTEGER);
 
 INSERT INTO documents VALUES
     (1, 'aa', '100', '3 de octubre de 2024', 'Cámara'),
@@ -58,8 +59,8 @@ INSERT INTO legislator_terms VALUES
     (3, 'Cámara de Representantes', '2022-07-20', '2026-07-19', 'Conservador');
 INSERT INTO legislator_service VALUES
     (1, 'Cámara', '2022-07-20', '2024-10-01', '2025-06-30', 2);
-INSERT INTO vote_absences VALUES (1, 3, 'Carla Díaz');
-INSERT INTO vote_attendance VALUES (1, '2024-10-01', 'vote', 3, 2, 1);
+INSERT INTO vote_absences VALUES (1, 3, 'Carla Díaz', 1);
+INSERT INTO vote_attendance VALUES (1, '2024-10-01', 'vote', 3, 2, 1, 1);
 """
 
 
@@ -110,11 +111,17 @@ def test_search_ignores_accents_and_case_and_dates_filter(client):
 
 def test_vote_groups_members_with_their_party_at_the_time(client):
     v = client.get("/api/votes/1").json()
-    assert v["counts"] == {"yes": 1, "no": 1, "abstain": 0, "absent": 1}
+    assert v["counts"] == {
+        "yes": 1,
+        "no": 1,
+        "abstain": 0,
+        "absent": 1,
+        "absent_in_session": 1,
+    }
     assert v["groups"]["yes"] == [
         {"id": 1, "name": "Ana Pérez", "photo_url": "https://example.org/1.jpg", "party": "Liberal"}
     ]
-    assert [p["name"] for p in v["groups"]["absent"]] == ["Carla Díaz"]
+    assert [(p["name"], p["in_session"]) for p in v["groups"]["absent"]] == [("Carla Díaz", True)]
     assert v["gazette"] == {"number": "100", "published": "2024-10-03", "page": 5, "pdf": "/pdf/1"}
 
 
@@ -131,10 +138,12 @@ def test_unchecked_votes_have_no_absent_list_and_unlinked_names(client):
 def test_legislator_profile(client):
     p = client.get("/api/legislators/1").json()
     assert p["party"] == "Verde"
-    assert p["totals"] == {"yes": 1, "no": 0, "abstain": 0, "absent": 0}
+    assert p["totals"] == {"yes": 1, "no": 0, "abstain": 0, "absent": 0, "absent_in_session": 0}
+    assert p["record"][0]["in_session"] is None
     assert p["record"][0]["position"] == "yes" and p["record"][0]["party_then"] == "Liberal"
     absent = client.get("/api/legislators/3").json()["record"]
-    assert [(r["id"], r["position"]) for r in absent] == [(1, "absent")]
+    assert [(r["id"], r["position"], r["in_session"]) for r in absent] == [(1, "absent", True)]
+    assert client.get("/api/legislators/3").json()["totals"]["absent_in_session"] == 1
     assert [p["id"] for p in client.get("/api/legislators?q=diaz").json()["legislators"]] == [3]
 
 
@@ -143,6 +152,14 @@ def test_pdf_is_served_inline(client):
     assert r.headers["content-type"] == "application/pdf"
     assert r.headers["content-disposition"].startswith("inline")
     assert client.get("/pdf/2").status_code == 404
+
+
+def test_refuses_a_database_from_an_older_attendance_stage(votes_db):
+    conn = sqlite3.connect(votes_db)
+    conn.execute("ALTER TABLE vote_absences DROP COLUMN in_session")
+    conn.commit()
+    with pytest.raises(SystemExit, match="older cva.attendance"):
+        web.Data(votes_db)
 
 
 def test_refuses_a_database_without_the_attendance_tables(votes_db):
