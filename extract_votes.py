@@ -33,7 +33,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 
 import pymupdf
@@ -716,15 +716,17 @@ def attach_records(votes, records, pages=()):
     return votes + extra
 
 
-def recheck_records(doc):
-    """Read again, at a higher resolution, the record pages of votes whose rows
-    don't add up, and keep the new readings if they verify more votes."""
-    votes = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
+def pages_to_recheck(doc, votes):
+    """Record pages behind votes whose rows don't add up, to read again at a
+    higher resolution."""
     bad = {int(p) for v in votes if v.get("verified") == 0
            for p in re.findall(r"record on page (\d+)", v.get("check_note") or "")}
-    if not bad:
-        return votes
-    retry = {p: extract_record_page(*doc["record_args"][p], dpis=(RECORD_RETRY_DPI,))[0] for p in bad if p in doc["record_args"]}
+    return sorted(bad & set(doc["record_args"]))
+
+
+def with_rechecks(doc, votes, retry):
+    """The votes with the pages in `retry` ({page: records}) read again, if that
+    verifies more of them; otherwise `votes` unchanged."""
     records = [r for r in doc["records"] if r["page"] not in retry] + [r for rs in retry.values() for r in rs]
     again = attach_records([dict(v) for v in doc["found"]], records, doc["page_texts"])
     verified = lambda vs: sum(v.get("verified") == 1 for v in vs)
@@ -938,19 +940,36 @@ def main():
     futures |= {ex.submit(extract_record_page, meta, path, page_no, members): ("record", doc, page_no)
                 for doc, meta, path, page_no, members in record_jobs}
     try:
-        for fut in as_completed(futures):
-            kind, doc, start = futures[fut]
-            result, error = fut.result()
-            if kind == "chunk":
-                doc["chunks_failed"] += error is not None
-                doc["found"] += [v for v in result
-                                 if isinstance(v, dict) and keep_vote(v, start, doc["pages"])]
-            else:
-                doc["record_pages_failed"] += error is not None
-                doc["records"] += result
-            doc["pending"] -= 1
-            if not doc["pending"]:
-                total += save_document(conn, doc, recheck_records(doc))
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for fut in done:
+                kind, doc, key = futures.pop(fut)
+                result, error = fut.result()
+                if kind == "chunk":
+                    doc["chunks_failed"] += error is not None
+                    doc["found"] += [v for v in result
+                                     if isinstance(v, dict) and keep_vote(v, key, doc["pages"])]
+                elif kind == "record":
+                    doc["record_pages_failed"] += error is not None
+                    doc["records"] += result
+                elif error is None:  # a recheck; a failed one leaves the first reading
+                    doc["retry"][key] = result
+                doc["pending"] -= 1
+                if doc["pending"]:
+                    continue
+                if "votes" not in doc:
+                    # First pass done: read the pages of votes that don't add up
+                    # again, alongside other documents' calls.
+                    doc["votes"] = attach_records([dict(v) for v in doc["found"]], doc["records"], doc["page_texts"])
+                    doc["retry"] = {}
+                    for page_no in pages_to_recheck(doc, doc["votes"]):
+                        futures[ex.submit(extract_record_page, *doc["record_args"][page_no],
+                                          dpis=(RECORD_RETRY_DPI,))] = ("recheck", doc, page_no)
+                        doc["pending"] += 1
+                    if doc["pending"]:
+                        continue
+                total += save_document(conn, doc, with_rechecks(doc, doc["votes"], doc["retry"])
+                                       if doc["retry"] else doc["votes"])
     except BudgetExceeded as e:
         ex.shutdown(wait=False, cancel_futures=True)
         sys.exit(f"Stopping: the LLM account is out of budget ({e}). "
