@@ -33,7 +33,9 @@ export function App() {
   const update = (next: Parameters<typeof listHash>[0]) =>
     onList ? replace(listHash(next)) : go(listHash(next));
 
-  useEffect(() => window.scrollTo(0, 0), [route.path, detail?.[2]]);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [route.path, detail?.[2]]);
 
   return (
     <div className="page">
@@ -103,7 +105,9 @@ export function App() {
 // Updates the URL a moment after typing stops.
 function SearchInput({ value, placeholder, onChange }: { value: string; placeholder: string; onChange: (v: string) => void }) {
   const [text, setText] = useState(value);
-  useEffect(() => setText(value), [value]);
+  useEffect(() => {
+    setText(value);
+  }, [value]);
   useEffect(() => {
     if (text === value) return;
     const timer = setTimeout(() => onChange(text), 250);
