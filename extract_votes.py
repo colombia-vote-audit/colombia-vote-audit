@@ -13,8 +13,8 @@ its earlier results.
 House plenary sessions vote electronically, and their full roll calls are only
 in scanned voting records printed as images. Those pages are read from the
 image (LLM_VISION_MODEL, default LLM_MODEL), and each result is checked against
-the record's printed totals and the result announced in the text; votes that
-don't add up are stored with verified = 0 and the reason. With --legislators
+the record's printed totals and row numbers; votes that don't add up are
+stored with verified = 0 and the reason. With --legislators
 (the pipeline database), the model gives each row as a number from a list of
 the House members sitting that day instead of spelling the name from the scan,
 and each number is checked against the surname printed on the row.
@@ -355,6 +355,8 @@ def read_rows(record, members):
         elif member and not surname_fits(surname, member):
             problem = f"member {number} is {member['surnames']}, but the row reads {surname!r}"
             member = None
+        if isinstance(n, str) and n.strip(" .").isdigit():
+            n = int(n.strip(" ."))
         rows.append({"n": n if isinstance(n, int) else None, "vote": vote,
                      "name": f"{member['surnames']} {member['given']}" if member else printed,
                      "legislator_id": member["id"] if member else None, "problem": problem})
@@ -550,16 +552,34 @@ def record_names(record, side):
 
 
 def check_members(parts):
-    """Problems tying the rows of a vote's records to members: rows with no
-    member or the wrong surname, and members listed twice."""
-    problems = [f"{r.get('kind')} record on page {r.get('page')} row {row['n'] or '?'}: {row['problem']}"
-                for r in parts for row in r["rows"] if row["problem"]]
+    """Rows of a vote's records that couldn't be tied to a member (no member,
+    or the wrong surname)."""
+    return [f"{r.get('kind')} record on page {r.get('page')} row {row['n'] or '?'}: {row['problem']}"
+            for r in parts for row in r["rows"] if row["problem"]]
+
+
+def listed_twice(parts):
+    """A note naming members who appear more than once in a vote's records. The
+    records themselves can do this: a member who votes electronically and by
+    hand is printed in both, sometimes on opposite sides."""
     ids = [row["legislator_id"] for r in parts for row in r["rows"] if row["legislator_id"] is not None]
     twice = sorted({row["name"] for r in parts for row in r["rows"]
                     if row["legislator_id"] is not None and ids.count(row["legislator_id"]) > 1})
-    if twice:
-        problems.append(f"listed more than once: {', '.join(twice)}")
-    return problems
+    return [f"listed more than once: {', '.join(twice)}"] if twice else []
+
+
+def check_row_numbers(record):
+    """Why an electronic record's row numbers don't run 1..N without gaps or
+    repeats, or None. Manual records aren't numbered reliably."""
+    if record.get("kind") != "electronic":
+        return None
+    ns = [row["n"] for row in record["rows"]]
+    if None in ns:
+        return f"electronic record on page {record.get('page')}: {ns.count(None)} rows without a row number"
+    if sorted(ns) != list(range(1, len(ns) + 1)):
+        return (f"electronic record on page {record.get('page')}: row numbers {min(ns)}-{max(ns)} "
+                f"for {len(ns)} rows, expected 1-{len(ns)}")
+    return None
 
 
 def check_record(record):
@@ -632,8 +652,10 @@ def attach_records(votes, records, pages=()):
     number appears in the record's title. The text still says what was voted;
     the records say who voted how. A record with no text vote becomes a vote of
     its own. Votes get verified = 1 when every record's rows match its printed
-    totals and the result announced in the text (`pages`, where the model can't
-    have influenced it), 0 with the reasons in check_note otherwise."""
+    totals, the electronic record's rows are numbered 1..N and every row is tied
+    to a member, 0 with the reasons in check_note otherwise. check_note also
+    notes, without failing the vote, members listed twice and differences from
+    the result announced in the text (`pages`)."""
     electronic = sorted((r for r in records if r.get("kind") == "electronic"), key=lambda r: r["page"])
     manual = [r for r in records if r.get("kind") == "manual"]
     # Join records that run onto the next page: rows there come without a title
@@ -662,16 +684,18 @@ def attach_records(votes, records, pages=()):
                  and 0 <= e["page"] - page_of(v) <= 4]
         best = max(cands, default=None, key=lambda i: (
             bool(numbers(votes[i].get("bill_name")) & numbers(e.get("title"))), page_of(votes[i])))
-        problems = [p for p in map(check_record, parts) if p] + check_members(parts)
+        problems = [p for p in [*map(check_record, parts), check_row_numbers(e)] if p] + check_members(parts)
+        # The announced result is only a note: the secretary sometimes misstates
+        # it and corrects it later in a "nota aclaratoria", while the records
+        # come from the voting system.
         announced = house_result("\n".join(pages[max(0, e["page"] - 3):e["page"]]))
-        if announced is None:
-            problems.append("no announced result found in the text")
-        problems += check_announced(e, parts[1] if len(parts) > 1 else None, announced)
+        notes = listed_twice(parts) + [f"differs from the announced result: {p}" for p in
+                                       check_announced(e, parts[1] if len(parts) > 1 else None, announced)]
         filled = {"yes": sum((record_names(r, "si") for r in parts), []),
                   "no": sum((record_names(r, "no") for r in parts), []), "abstain": [],
                   "legislator_ids": {row["name"]: row["legislator_id"] for r in parts for row in r["rows"]
                                      if row["legislator_id"] is not None},
-                  "source": "record", "verified": int(not problems), "check_note": "; ".join(problems) or None}
+                  "source": "record", "verified": int(not problems), "check_note": "; ".join(problems + notes) or None}
         if best is not None:
             used_votes.add(best)
             votes[best].update(filled)
@@ -742,8 +766,9 @@ CREATE TABLE IF NOT EXISTS votes (
     page         INTEGER,                   -- gazette page where the vote begins, as reported by the model
     source       TEXT NOT NULL DEFAULT 'text' CHECK (source IN ('text', 'record')),
                                             -- where the names come from: the text, or scanned voting records
-    verified     INTEGER,                   -- records only: 1 if the rows match the printed totals, else 0
-    check_note   TEXT,                      -- why verified is 0
+    verified     INTEGER,                   -- records only: 1 if the rows match the printed totals, are
+                                            -- numbered 1..N and all match a member, else 0
+    check_note   TEXT,                      -- why verified is 0, and notes that don't fail the vote
     raw_json     TEXT NOT NULL              -- the model's output for this vote, unmodified
 );
 
