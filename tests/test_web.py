@@ -105,6 +105,7 @@ def test_search_ignores_accents_and_case_and_dates_filter(client):
     assert [v["id"] for v in client.get("/api/votes?q=proyecto ley").json()["votes"]] == [3, 1]
     got = client.get("/api/votes?from=2025-01-01&to=2025-12-31").json()
     assert got["total"] == 1 and got["votes"][0]["id"] == 3
+    assert [v["id"] for v in client.get("/api/votes?chamber=Senado").json()["votes"]] == [3]
 
 
 def test_vote_groups_members_with_their_party_at_the_time(client):

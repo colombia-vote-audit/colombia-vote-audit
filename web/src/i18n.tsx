@@ -20,7 +20,11 @@ const en = {
   loading: "Loading…",
   noVotes: "No votes match.",
   allVotes: "All votes",
+  allLegislators: "All legislators",
   backToSearch: "Back to search",
+  backToVote: "Back to the vote",
+  backToLegislator: "Back to the legislator",
+  bothChambers: "Both chambers",
   result: { approved: "Approved", rejected: "Rejected", unknown: "Result unknown" },
   voteType: {
     final_passage: "Final passage",
@@ -90,7 +94,11 @@ const es: Dict = {
   loading: "Cargando…",
   noVotes: "Ninguna votación coincide.",
   allVotes: "Todas las votaciones",
+  allLegislators: "Todos los congresistas",
   backToSearch: "Volver a la búsqueda",
+  backToVote: "Volver a la votación",
+  backToLegislator: "Volver al congresista",
+  bothChambers: "Ambas cámaras",
   result: { approved: "Aprobado", rejected: "Negado", unknown: "Resultado desconocido" },
   voteType: {
     final_passage: "Votación final",

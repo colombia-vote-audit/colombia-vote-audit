@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { useFetch } from "./common";
 import { useI18n, type Lang } from "./i18n";
-import { go, href, parse, replace, useRoute } from "./router";
+import { go, href, parse, previous, replace, useRoute, type Route } from "./router";
 import { LegislatorDetail } from "./views/LegislatorDetail";
 import { Legislators } from "./views/Legislators";
 import { VoteDetail } from "./views/VoteDetail";
@@ -23,12 +23,20 @@ export function App() {
   const q = listRoute.params.get("q") ?? "";
   const from = listRoute.params.get("from") ?? "";
   const to = listRoute.params.get("to") ?? "";
+  const chamber = listRoute.params.get("chamber") ?? "";
+  const backHash = previous() ?? lastList.current;
+  const back = { href: backHash, label: backLabel(parse(backHash), t) };
 
-  const listHash = (next: { mode?: string; q?: string; from?: string; to?: string }) => {
+  const listHash = (next: { mode?: string; q?: string; from?: string; to?: string; chamber?: string }) => {
     const m = next.mode ?? mode;
     return m === "legislators"
       ? href("/legislators", { q: next.q ?? q })
-      : href("/", { q: next.q ?? q, from: next.from ?? from, to: next.to ?? to });
+      : href("/", {
+          q: next.q ?? q,
+          from: next.from ?? from,
+          to: next.to ?? to,
+          chamber: next.chamber ?? chamber,
+        });
   };
   const update = (next: Parameters<typeof listHash>[0]) =>
     onList ? replace(listHash(next)) : go(listHash(next));
@@ -36,6 +44,10 @@ export function App() {
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [route.path, detail?.[2]]);
+  // Detail pages set their own title once they've loaded.
+  useEffect(() => {
+    if (onList) document.title = t.title;
+  }, [onList, t]);
 
   return (
     <div className="page">
@@ -89,17 +101,29 @@ export function App() {
               {t.clearDates}
             </button>
           )}
+          <select value={chamber} onChange={(e) => update({ chamber: e.target.value })}>
+            <option value="">{t.bothChambers}</option>
+            <option value="Cámara">Cámara</option>
+            <option value="Senado">Senado</option>
+          </select>
         </div>
       )}
 
       <main>
-        {detail?.[1] === "vote" && <VoteDetail id={Number(detail[2])} back={lastList.current} />}
-        {detail?.[1] === "legislator" && <LegislatorDetail id={Number(detail[2])} back={lastList.current} />}
-        {onList && mode === "votes" && <VoteList q={q} from={from} to={to} />}
+        {detail?.[1] === "vote" && <VoteDetail id={Number(detail[2])} back={back} />}
+        {detail?.[1] === "legislator" && <LegislatorDetail id={Number(detail[2])} back={back} />}
+        {onList && mode === "votes" && <VoteList q={q} from={from} to={to} chamber={chamber} />}
         {onList && mode === "legislators" && <Legislators q={q} />}
       </main>
     </div>
   );
+}
+
+function backLabel(route: Route, t: ReturnType<typeof useI18n>["t"]): string {
+  if (route.path.startsWith("/vote/")) return t.backToVote;
+  if (route.path.startsWith("/legislator/")) return t.backToLegislator;
+  if (route.path === "/legislators") return t.allLegislators;
+  return route.params.size ? t.backToSearch : t.allVotes;
 }
 
 // Updates the URL a moment after typing stops.

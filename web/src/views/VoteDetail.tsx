@@ -1,18 +1,16 @@
 import { api, type Person, type Position, type VoteDetail as Vote } from "../api";
-import { CheckBadge, ResultBadge, Status, useFetch } from "../common";
+import { BackLink, CheckBadge, ResultBadge, Status, useFetch, useTitle, type Back } from "../common";
 import { useI18n } from "../i18n";
 import { href } from "../router";
 
 const POSITIONS: Position[] = ["yes", "no", "abstain", "absent"];
 
-export function VoteDetail({ id, back }: { id: number; back: string }) {
-  const { t } = useI18n();
+export function VoteDetail({ id, back }: { id: number; back: Back }) {
   const { data: v, loading, error } = useFetch(() => api.vote(id), [id]);
+  useTitle(v && (v.subject ?? v.bill_name));
   return (
     <section className="detail">
-      <a className="back" href={back}>
-        ← {t.allVotes}
-      </a>
+      <BackLink back={back} />
       <Status loading={loading && !v} error={error}>
         {v && <Body v={v} />}
       </Status>

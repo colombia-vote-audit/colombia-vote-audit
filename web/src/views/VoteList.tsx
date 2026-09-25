@@ -6,7 +6,7 @@ import { href } from "../router";
 
 const PAGE = 50;
 
-export function VoteList({ q, from, to }: { q: string; from: string; to: string }) {
+export function VoteList({ q, from, to, chamber }: { q: string; from: string; to: string; chamber: string }) {
   const { t, num } = useI18n();
   const [votes, setVotes] = useState<VoteSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -14,7 +14,7 @@ export function VoteList({ q, from, to }: { q: string; from: string; to: string 
 
   const load = (offset: number, live: () => boolean = () => true) => {
     setState({ loading: true });
-    api.votes({ q, from, to, offset, limit: PAGE }).then(
+    api.votes({ q, from, to, chamber, offset, limit: PAGE }).then(
       (r) => {
         if (!live()) return;
         setVotes((vs) => (offset ? [...vs, ...r.votes] : r.votes));
@@ -31,7 +31,7 @@ export function VoteList({ q, from, to }: { q: string; from: string; to: string 
     return () => {
       live = false;
     };
-  }, [q, from, to]);
+  }, [q, from, to, chamber]);
 
   return (
     <section>

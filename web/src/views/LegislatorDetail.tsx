@@ -1,19 +1,28 @@
 import { useState } from "react";
 import { api, type LegislatorDetail as Legislator, type Position } from "../api";
-import { Avatar, PositionBadge, Status, VoteDate, shortChamber, termYears, useFetch } from "../common";
+import {
+  Avatar,
+  BackLink,
+  PositionBadge,
+  Status,
+  VoteDate,
+  shortChamber,
+  termYears,
+  useFetch,
+  useTitle,
+  type Back,
+} from "../common";
 import { useI18n } from "../i18n";
 import { href } from "../router";
 
 const PAGE = 100;
 
-export function LegislatorDetail({ id, back }: { id: number; back: string }) {
-  const { t } = useI18n();
+export function LegislatorDetail({ id, back }: { id: number; back: Back }) {
   const { data, loading, error } = useFetch(() => api.legislator(id), [id]);
+  useTitle(data?.name);
   return (
     <section className="detail">
-      <a className="back" href={back}>
-        ← {t.backToSearch}
-      </a>
+      <BackLink back={back} />
       <Status loading={loading && !data} error={error}>
         {data && <Body p={data} key={data.id} />}
       </Status>

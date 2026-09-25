@@ -82,7 +82,7 @@ async function get<T>(path: string, params: Record<string, string | number | und
 
 export const api = {
   stats: () => get<Stats>("/api/stats"),
-  votes: (p: { q?: string; from?: string; to?: string; offset?: number; limit?: number }) =>
+  votes: (p: { q?: string; from?: string; to?: string; chamber?: string; offset?: number; limit?: number }) =>
     get<{ total: number; votes: VoteSummary[] }>("/api/votes", p),
   vote: (id: number) => get<VoteDetail>(`/api/votes/${id}`),
   legislators: (q?: string) => get<{ total: number; legislators: LegislatorSummary[] }>("/api/legislators", { q }),

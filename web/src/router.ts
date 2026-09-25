@@ -17,6 +17,22 @@ export function parse(hash: string): Route {
 
 const current = () => parse(location.hash);
 
+// Pages visited in this tab, so a detail page can link back to wherever the
+// reader came from. Going to the page just below the top counts as going back.
+const visited: string[] = [location.hash || "#/"];
+
+function track() {
+  const hash = location.hash || "#/";
+  if (visited.length > 1 && visited[visited.length - 2] === hash) visited.pop();
+  else if (visited[visited.length - 1] !== hash) visited.push(hash);
+}
+window.addEventListener("hashchange", track);
+
+// The previous page in the app, or null when the reader arrived here directly.
+export function previous(): string | null {
+  return visited.length > 1 ? visited[visited.length - 2] : null;
+}
+
 export function useRoute(): Route {
   const [route, setRoute] = useState(current);
   useEffect(() => {
@@ -39,6 +55,7 @@ export function href(path: string, params: Record<string, string | undefined> = 
 // Replace the current entry, for search input, so typing doesn't fill the history.
 export function replace(hash: string) {
   history.replaceState(null, "", hash);
+  visited[visited.length - 1] = hash;
   window.dispatchEvent(new Event(CHANGE));
 }
 

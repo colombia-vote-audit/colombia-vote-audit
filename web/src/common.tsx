@@ -1,6 +1,7 @@
 import { useEffect, useState, type DependencyList, type ReactNode } from "react";
 import type { Position, VoteSummary } from "./api";
 import { useI18n } from "./i18n";
+import { previous } from "./router";
 
 export function useFetch<T>(load: () => Promise<T>, deps: DependencyList) {
   const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
@@ -85,4 +86,35 @@ export function termYears(start: string, end: string): string {
 // 'Cámara de Representantes' -> 'Cámara', to match the gazettes' labels.
 export function shortChamber(chamber: string): string {
   return chamber.split(" ")[0];
+}
+
+export interface Back {
+  href: string;
+  label: string;
+}
+
+// Goes back in the browser's history when the previous page is the target,
+// so the back button afterwards still behaves.
+export function BackLink({ back }: { back: Back }) {
+  return (
+    <a
+      className="back"
+      href={back.href}
+      onClick={(e) => {
+        if (previous() === back.href) {
+          e.preventDefault();
+          history.back();
+        }
+      }}
+    >
+      ← {back.label}
+    </a>
+  );
+}
+
+export function useTitle(title: string | null | undefined) {
+  const { t } = useI18n();
+  useEffect(() => {
+    if (title) document.title = `${title} · ${t.title}`;
+  }, [title, t]);
 }
