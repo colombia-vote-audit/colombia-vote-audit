@@ -17,7 +17,7 @@ the record's printed totals and row numbers; votes that don't add up are
 stored with verified = 0 and the reason. With --legislators
 (the pipeline database), the model gives each row as a number from a list of
 the House members sitting that day instead of spelling the name from the scan,
-and each number is checked against the surname printed on the row.
+and each number is checked against the surnames printed on the row.
 
 Only dependency: PyMuPDF (pip install pymupdf). LLM calls go to an OpenAI-compatible gateway (LLM_BASE_URL).
 """
@@ -168,8 +168,8 @@ Return only a json object: {"records": [...]}, or {"records": []} if the page ha
  "title": "the vote's title as printed, or ''",
  "date": "DD/MM/YYYY as printed, or ''",
  "totals": {"si": int, "no": int},   // exactly as printed in the record's totals box or TOTAL row
- "rows": [[row, member, "SURNAME", "si" | "no"], ...]}
-Each row is [the row number as printed (null for manual records), the MEMBERS number or null, the first surname exactly as printed on that row, the vote]. For a row whose member is null, add the full printed name as a fifth item. Include every row of every record on the page, in order.
+ "rows": [[row, member, "SURNAMES", "si" | "no"], ...]}
+Each row is [the row number as printed (null for manual records), the MEMBERS number or null, the surnames exactly as printed on that row (both of them, e.g. "RINCON TRUJILLO"), the vote]. For a row whose member is null, add the full printed name as a fifth item. Include every row of every record on the page, in order.
 A record's rows can continue from the previous page without its title or totals: return those rows as a record with kind "electronic", title "" and totals {"si": 0, "no": 0}."""
 
 
@@ -330,35 +330,50 @@ def edit_distance(a, b):
     return row[-1]
 
 
-def surname_fits(printed, member):
-    """Whether the first surname printed on a row is the member's, allowing a
-    misread letter (two in longer names)."""
-    first = lambda s: next((t for t in re.findall(r"[a-z]+", fold(s).replace("-", "")) if t not in PARTICLES), "")
-    a, b = first(printed), first(member["surnames"])
-    return bool(a) and edit_distance(a, b) <= (1 if len(b) <= 6 else 2)
+def surname_fits(printed, member, members=()):
+    """Whether the surnames printed on a row are the member's, allowing one
+    misread letter. All the member's surnames count: a third of the House
+    shares a first surname with a colleague, and those sit next to each other
+    in MEMBERS, where the model sometimes picks the neighbour. The printed
+    words are compared, joined, with the member's surnames, optionally followed
+    by given names, so "JAY-PANG DIAZ" fits "Jaypang Díaz" and "GONZALEZ
+    HERNANDO" fits a member whose only surname is González. When no other
+    member in `members` has a first surname within a letter of the printed
+    one, a swap is impossible and the first surname is enough: the records sometimes print the second one
+    differently from the legislators list ("CADAVID MARTINEZ" for Cadavid
+    Márquez)."""
+    words = lambda s: [t for t in re.findall(r"[a-z]+", fold(s).replace("-", "")) if t not in PARTICLES]
+    got, surnames = words(printed), words(member["surnames"])
+    full = surnames + words(member.get("given") or "")
+    if got and any(edit_distance("".join(got), "".join(full[:k])) <= 1
+                   for k in range(max(1, len(surnames)), len(full) + 1)):
+        return True
+    first = lambda m: (words(m["surnames"]) or [""])[0]
+    return (bool(got) and bool(surnames) and edit_distance(got[0], surnames[0]) <= 1
+            and not any(edit_distance(got[0], first(m)) <= 1 for m in members if m is not member))
 
 
 def read_rows(record, members):
-    """Replace the model's rows, [row, member, surname, vote, printed name?],
+    """Replace the model's rows, [row, member, surnames, vote, printed name?],
     with dicts: n, vote, name, legislator_id, and problem saying why the row
     couldn't be tied to a member (None if it was, or if there is no list)."""
     rows = []
     for row in record.get("rows") or []:
         if not isinstance(row, list) or len(row) < 4:
             continue
-        n, number, surname, vote = row[:4]
-        printed = str(row[4] if len(row) > 4 and row[4] else surname or "").strip()
+        n, number, surnames, vote = row[:4]
+        printed = str(row[4] if len(row) > 4 and row[4] else surnames or "").strip()
         member = members[number - 1] if isinstance(number, int) and 1 <= number <= len(members) else None
         problem = None
         if members and member is None:
             problem = f"no member found for {printed!r}"
-        elif member and not surname_fits(surname, member):
-            problem = f"member {number} is {member['surnames']}, but the row reads {surname!r}"
+        elif member and not surname_fits(surnames, member, members):
+            problem = f"member {number} is {member['surnames']}, but the row reads {surnames!r}"
             member = None
         if isinstance(n, str) and n.strip(" .").isdigit():
             n = int(n.strip(" ."))
         rows.append({"n": n if isinstance(n, int) else None, "vote": vote,
-                     "name": f"{member['surnames']} {member['given']}" if member else printed,
+                     "name": " ".join(filter(None, (member["surnames"], member["given"]))) if member else printed,
                      "legislator_id": member["id"] if member else None, "problem": problem})
     record["rows"] = rows
     return record
