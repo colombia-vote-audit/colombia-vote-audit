@@ -141,6 +141,9 @@ sup { font-size: 0.75em; margin-left: 1px; }
 h2.section { font-size: 12.5px; letter-spacing: 0.12em; text-transform: uppercase; margin: 32px 0 12px; }
 
 @media (max-width: 760px) {
+  .top { flex-direction: column; align-items: stretch; gap: 10px; }
+  .brand { flex-direction: column; gap: 2px; }
+  .top-right { margin-left: 0; justify-content: space-between; }
   .row { grid-template-columns: 1fr; gap: 6px; }
   .row .side { align-items: flex-start; }
   .columns.n3, .columns.n4, .stats { grid-template-columns: 1fr 1fr; }
