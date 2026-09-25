@@ -27,6 +27,8 @@ CREATE TABLE legislator_service (legislator_id INTEGER, chamber TEXT, term_start
                                  first_vote TEXT, last_vote TEXT, votes INTEGER);
 CREATE TABLE vote_absences (vote_id INTEGER, legislator_id INTEGER, legislator TEXT,
                             in_session INTEGER);
+CREATE TABLE text_record_legislators (vote_id INTEGER, legislator TEXT,
+                                      legislator_id INTEGER, how TEXT);
 CREATE TABLE vote_attendance (vote_id INTEGER PRIMARY KEY, session_date TEXT,
                               date_source TEXT, eligible INTEGER, voted INTEGER,
                               absent INTEGER, absent_in_session INTEGER);
@@ -48,6 +50,7 @@ INSERT INTO vote_records VALUES
     (1, 'Pérez Ana', 'yes', 1),
     (1, 'Ruiz Beto', 'no', 2),
     (2, 'Beto Ruiz', 'yes', NULL),
+    (3, 'Zapata Luis', 'no', NULL),
     (4, 'Ana Pérez', 'no', 1);
 INSERT INTO legislators VALUES
     (1, 'Ana Pérez', 'https://example.org/1.jpg'), (2, 'Beto Ruiz', NULL),
@@ -59,6 +62,7 @@ INSERT INTO legislator_terms VALUES
     (3, 'Cámara de Representantes', '2022-07-20', '2026-07-19', 'Conservador');
 INSERT INTO legislator_service VALUES
     (1, 'Cámara', '2022-07-20', '2024-10-01', '2025-06-30', 2);
+INSERT INTO text_record_legislators VALUES (2, 'Beto Ruiz', 2, 'exact');
 INSERT INTO vote_absences VALUES (1, 3, 'Carla Díaz', 1);
 INSERT INTO vote_attendance VALUES (1, '2024-10-01', 'vote', 3, 2, 1, 1);
 """
@@ -83,7 +87,7 @@ def client(votes_db, tmp_path):
 
 
 def test_committee_votes_are_left_out(client):
-    assert client.get("/api/stats").json() == {"votes": 3, "records": 3, "legislators": 3}
+    assert client.get("/api/stats").json() == {"votes": 3, "records": 4, "legislators": 3}
     assert [v["id"] for v in client.get("/api/votes").json()["votes"]] == [3, 2, 1]
     assert client.get("/api/votes/4").status_code == 404
     record = client.get("/api/legislators/1").json()["record"]
@@ -125,14 +129,18 @@ def test_vote_groups_members_with_their_party_at_the_time(client):
     assert v["gazette"] == {"number": "100", "published": "2024-10-03", "page": 5, "pdf": "/pdf/1"}
 
 
-def test_unchecked_votes_have_no_absent_list_and_unlinked_names(client):
+def test_text_votes_link_matched_names_and_have_no_absent_list(client):
     v = client.get("/api/votes/2").json()
     assert v["counts"]["absent"] is None and v["groups"]["absent"] is None
-    assert v["groups"]["yes"] == [
-        {"id": None, "name": "Beto Ruiz", "photo_url": None, "party": None}
-    ]
+    assert v["groups"]["yes"] == [{"id": 2, "name": "Beto Ruiz", "photo_url": None, "party": None}]
     assert v["gazette"]["pdf"] == "/pdf/1"
-    assert client.get("/api/votes/3").json()["gazette"]["pdf"] is None
+    unmatched = client.get("/api/votes/3").json()
+    assert unmatched["groups"]["no"] == [
+        {"id": None, "name": "Zapata Luis", "photo_url": None, "party": None}
+    ]
+    assert unmatched["gazette"]["pdf"] is None
+    record = client.get("/api/legislators/2").json()["record"]
+    assert [(r["id"], r["position"]) for r in record] == [(2, "yes"), (1, "no")]
 
 
 def test_legislator_profile(client):

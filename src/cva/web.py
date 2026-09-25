@@ -56,6 +56,7 @@ REQUIRED_TABLES = {
     "legislator_service",
     "vote_absences",
     "vote_attendance",
+    "text_record_legislators",
 }
 
 
@@ -281,8 +282,11 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
                 "SELECT publication_date, sha256 FROM documents WHERE id = ?",
                 (v["document_id"],),
             ).fetchone()
+            # Names on text votes are tied to legislators by the attendance stage.
             records = conn.execute(
-                "SELECT legislator, vote, legislator_id FROM vote_records WHERE vote_id = ?",
+                "SELECT r.legislator, r.vote, coalesce(r.legislator_id, m.legislator_id)"
+                " FROM vote_records r LEFT JOIN text_record_legislators m"
+                " ON m.vote_id = r.vote_id AND m.legislator = r.legislator WHERE r.vote_id = ?",
                 (vid,),
             ).fetchall()
             absent = conn.execute(
@@ -337,9 +341,12 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
         try:
             positions = conn.execute(
                 "SELECT vote_id, vote, NULL FROM vote_records WHERE legislator_id = ?"
+                " UNION ALL SELECT r.vote_id, r.vote, NULL FROM text_record_legislators m"
+                " JOIN vote_records r ON r.vote_id = m.vote_id AND r.legislator = m.legislator"
+                " WHERE m.legislator_id = ?"
                 " UNION ALL SELECT vote_id, 'absent', in_session FROM vote_absences"
                 " WHERE legislator_id = ?",
-                (lid, lid),
+                (lid, lid, lid),
             ).fetchall()
             service = [
                 {
