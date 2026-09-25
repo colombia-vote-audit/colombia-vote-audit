@@ -62,16 +62,30 @@ export function subtitle(vote: VoteSummary, t: ReturnType<typeof useI18n>["t"]):
   return [vote.bill_name, vote.chamber, vote.vote_type && t.voteType[vote.vote_type]].filter(Boolean).join(" · ");
 }
 
-export function Avatar({ name, photo, size }: { name: string; photo: string | null; size: number }) {
-  const [broken, setBroken] = useState(false);
+// Congreso Visible stores each photo at 510px as well as the 64-95px size
+// the API lists. Large avatars try the big one first.
+function largePhoto(url: string): string {
+  return url.replace(/-\d+px(\.\w+)$/, "-510px$1");
+}
+
+export function Avatar({ name, photo, size, large }: { name: string; photo: string | null; size: number; large?: boolean }) {
+  const sources = photo ? [...new Set([large ? largePhoto(photo) : photo, photo])] : [];
+  const [failed, setFailed] = useState(0);
   const initials = name
     .split(/\s+/)
     .filter((w) => /^\p{Lu}/u.test(w))
     .slice(0, 2)
     .map((w) => w[0])
     .join("");
-  return photo && !broken ? (
-    <img className="avatar" src={photo} alt="" width={size} height={size} onError={() => setBroken(true)} />
+  return failed < sources.length ? (
+    <img
+      className="avatar"
+      src={sources[failed]}
+      alt=""
+      width={size}
+      height={size}
+      onError={() => setFailed(failed + 1)}
+    />
   ) : (
     <span className="avatar initials" style={{ width: size, height: size, fontSize: size * 0.34 }}>
       {initials}

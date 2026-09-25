@@ -45,7 +45,7 @@ function Body({ p }: { p: Legislator }) {
   return (
     <>
       <header className="profile">
-        <Avatar name={p.name} photo={p.photo_url} size={88} />
+        <Avatar name={p.name} photo={p.photo_url} size={88} large />
         <div>
           <h1>{p.name}</h1>
           <p className="line">
