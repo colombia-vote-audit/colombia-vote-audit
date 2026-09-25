@@ -49,7 +49,11 @@ function Body({ p }: { p: Legislator }) {
     [t.position.absent, p.totals.absent, "absent"],
   ];
   // The records have only Sí and No, so the tile is shown only when the text names some.
-  const tiles = stats.filter(([, n, kind]) => kind !== "abstain" || n > 0);
+  // Who didn't vote is known only from checked records, which give a service window;
+  // without one (every senator, for now) it's unknown, not zero.
+  const tiles = stats.filter(
+    ([, n, kind]) => (kind !== "abstain" || n > 0) && (kind !== "absent" || p.service.length > 0),
+  );
   return (
     <>
       <header className="profile">
