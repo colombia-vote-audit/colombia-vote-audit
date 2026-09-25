@@ -599,9 +599,9 @@ def check_row_numbers(record):
         return None
     ns = [row["n"] for row in record["rows"]]
     if None in ns:
-        return f"electronic record on page {record.get('page')}: {ns.count(None)} rows without a row number"
+        return f"electronic record on {record_pages_text(record)}: {ns.count(None)} rows without a row number"
     if sorted(ns) != list(range(1, len(ns) + 1)):
-        return (f"electronic record on page {record.get('page')}: row numbers {min(ns)}-{max(ns)} "
+        return (f"electronic record on {record_pages_text(record)}: row numbers {min(ns)}-{max(ns)} "
                 f"for {len(ns)} rows, expected 1-{len(ns)}")
     return None
 
@@ -611,7 +611,12 @@ def check_record(record):
     totals = record.get("totals") or {}
     got = (len(record_names(record, "si")), len(record_names(record, "no")))
     want = (totals.get("si"), totals.get("no"))
-    return None if got == want else f"{record.get('kind')} record on page {record.get('page')}: rows {got[0]}-{got[1]}, printed totals {want[0]}-{want[1]}"
+    return None if got == want else f"{record.get('kind')} record on {record_pages_text(record)}: rows {got[0]}-{got[1]}, printed totals {want[0]}-{want[1]}"
+
+
+def record_pages_text(record):
+    """'page 31', or 'page 31 continued on page 32' for a record joined across pages."""
+    return " continued on ".join(f"page {p}" for p in record.get("pages") or [record.get("page")])
 
 
 # The House announces a plenary result as manual plus electronic ("digital") votes, e.g.
@@ -680,22 +685,50 @@ def attach_records(votes, records, pages=()):
     to a member, 0 with the reasons in check_note otherwise. check_note also
     notes, without failing the vote, members listed twice and differences from
     the result announced in the text (`pages`)."""
+    # Work on copies: the same records are assembled again after rechecks.
+    records = [{**r, "rows": list(r["rows"])} for r in records]
     electronic = sorted((r for r in records if r.get("kind") == "electronic"), key=lambda r: r["page"])
     manual = [r for r in records if r.get("kind") == "manual"]
-    # Join records that run onto the next page: rows there come without a title
-    # or totals (0-0), and belong to the record before whose rows fall short.
-    is_continuation = lambda r: not (r.get("title") or "").strip() and not any((r.get("totals") or {}).values())
+    # Join records that run onto the following pages. The rows there come
+    # without totals (0-0) and continue the numbering (44 after 43); the model
+    # sometimes repeats the title on them, so the title can't be relied on. The
+    # same scan is often placed on both pages, so a row at the edge can be read
+    # twice; a repeated row number is dropped.
+    first_n = lambda r: next((row["n"] for row in r["rows"] if row["n"] is not None), None)
+    last_n = lambda r: next((row["n"] for row in reversed(r["rows"]) if row["n"] is not None), None)
+    is_continuation = lambda r: not any(r["totals"].values())
+    joined = set()
     for e in electronic:
         if is_continuation(e):
             continue
-        want = sum(v or 0 for v in (e.get("totals") or {}).values())
-        for c in electronic:
-            if len(e["rows"]) >= want:
+        e["pages"] = [e["page"]]
+        for c in electronic:  # sorted by page, so a record can run over several pages
+            if len(e["rows"]) >= sum(e["totals"].values()):
                 break
-            if c["page"] == e["page"] + 1 and is_continuation(c) and not c.get("merged"):
-                e["rows"] = e["rows"] + c["rows"]
-                c["merged"] = True
-    electronic = [e for e in electronic if not e.get("merged")]
+            if c["page"] != e["pages"][-1] + 1 or not is_continuation(c) or id(c) in joined:
+                continue
+            # The rows must carry on the numbering; the first may repeat the last.
+            end, start = last_n(e), first_n(c)
+            if start is None or start == 1 or (end is not None and not start <= end + 1 <= last_n(c)):
+                continue
+            e["rows"] += [row for row in c["rows"] if end is None or row["n"] is None or row["n"] > end]
+            e["pages"].append(c["page"])
+            joined.add(id(c))
+    # Continuation rows that joined nothing mean a record was misread. Next to
+    # a record they fail it (and get both pages read again); elsewhere, or when
+    # numbered from 1 (a new record whose totals were misread), they stay a
+    # record of their own, which fails its checks.
+    heads = [e for e in electronic if "pages" in e]
+    for c in electronic:
+        if "pages" not in c and id(c) not in joined:
+            before = [e for e in heads if 0 <= c["page"] - e["pages"][-1] <= 1]
+            if before and (first_n(c) or 1) > 1:
+                before[-1].setdefault("stray", []).append(
+                    f"electronic record on page {c['page']}: rows {first_n(c)}-{last_n(c)} not joined to a record")
+            else:
+                c["pages"] = [c["page"]]
+                heads.append(c)
+    electronic = sorted(heads, key=lambda r: r["page"])
     used_votes, used_manual, extra = set(), set(), []
     for e in electronic:
         next_page_has_own = any(o["page"] == e["page"] + 1 for o in electronic)  # continuations are gone by now
@@ -708,7 +741,8 @@ def attach_records(votes, records, pages=()):
                  and 0 <= e["page"] - page_of(v) <= 4]
         best = max(cands, default=None, key=lambda i: (
             bool(numbers(votes[i].get("bill_name")) & numbers(e.get("title"))), page_of(votes[i])))
-        problems = [p for p in [*map(check_record, parts), check_row_numbers(e)] if p] + check_members(parts)
+        problems = ([p for p in [*map(check_record, parts), check_row_numbers(e)] if p]
+                    + e.get("stray", []) + check_members(parts))
         # The announced result is only a note: the secretary sometimes misstates
         # it and corrects it later in a "nota aclaratoria", while the records
         # come from the voting system.
@@ -744,7 +778,7 @@ def pages_to_recheck(doc, votes):
     """Record pages behind votes whose rows don't add up, to read again at a
     higher resolution."""
     bad = {int(p) for v in votes if v.get("verified") == 0
-           for p in re.findall(r"record on page (\d+)", v.get("check_note") or "")}
+           for p in re.findall(r"\bpage (\d+)", v.get("check_note") or "")}
     return sorted(bad & set(doc["record_args"]))
 
 
