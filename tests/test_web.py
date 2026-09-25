@@ -87,7 +87,12 @@ def client(votes_db, tmp_path):
 
 
 def test_committee_votes_are_left_out(client):
-    assert client.get("/api/stats").json() == {"votes": 3, "records": 4, "legislators": 3}
+    stats = client.get("/api/stats").json()
+    assert {k: stats[k] for k in ("votes", "records", "legislators")} == {
+        "votes": 3,
+        "records": 4,
+        "legislators": 3,
+    }
     assert [v["id"] for v in client.get("/api/votes").json()["votes"]] == [3, 2, 1]
     assert client.get("/api/votes/4").status_code == 404
     record = client.get("/api/legislators/1").json()["record"]
@@ -153,6 +158,13 @@ def test_legislator_profile(client):
     assert [(r["id"], r["position"], r["in_session"]) for r in absent] == [(1, "absent", True)]
     assert client.get("/api/legislators/3").json()["totals"]["absent_in_session"] == 1
     assert [p["id"] for p in client.get("/api/legislators?q=diaz").json()["legislators"]] == [3]
+
+
+def test_the_whole_database_can_be_downloaded(client, votes_db):
+    r = client.get("/download-db")
+    assert r.headers["content-disposition"].startswith('attachment; filename="colombia-vote-audit-')
+    assert r.content == votes_db.read_bytes()
+    assert client.get("/api/stats").json()["database_bytes"] == len(r.content)
 
 
 def test_pdf_is_served_inline(client):

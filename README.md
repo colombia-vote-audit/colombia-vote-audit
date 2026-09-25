@@ -114,6 +114,7 @@ uv run python -m cva.web votes.db --pdfs data/pdfs --static web/dist   # http://
 ```
 
 - `--pdfs` points at the pipeline's PDF store. Each vote then links to its page in the gazette PDF.
+- `/download-db` serves the votes database itself, committee votes included, so anyone can work with the data. The site links to it in its footer.
 - The API holds every vote's summary in memory. Restart it after the votes database is rebuilt.
 - A vote with no session date takes the date of the other votes in its gazette, else the gazette's publication date. The site marks these dates.
 - For frontend work, run the API as above and `npm run dev` in `web/`. Vite forwards `/api` and `/pdf` to port 8000.

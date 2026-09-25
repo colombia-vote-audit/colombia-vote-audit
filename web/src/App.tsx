@@ -115,6 +115,13 @@ export function App() {
         {onList && mode === "votes" && <VoteList q={q} from={from} to={to} chamber={chamber} />}
         {onList && mode === "legislators" && <Legislators q={q} />}
       </main>
+
+      <footer className="foot">
+        <a href="/download-db" download>
+          {t.downloadDb}
+        </a>
+        {stats.data && <small>{t.downloadNote(num(Math.round(stats.data.database_bytes / 1e6)))}</small>}
+      </footer>
     </div>
   );
 }

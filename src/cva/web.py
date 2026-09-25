@@ -23,6 +23,7 @@ Endpoints:
     GET /api/legislators?q=
     GET /api/legislators/{id}
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
+    GET /download-db            the votes database itself, for anyone to use
 
 Built frontend files under /assets/ have content hashes in their names and
 are cached for a year; API answers for five minutes, since they only change
@@ -36,6 +37,7 @@ import re
 import sqlite3
 import unicodedata
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -245,6 +247,7 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
                 "votes": len(data.votes),
                 "records": data.records,
                 "legislators": len(data.legislators),
+                "database_bytes": votes_db.stat().st_size,
             }
         )
 
@@ -412,6 +415,15 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
             content_disposition_type="inline",
         )
 
+    def download_db(request: Request):
+        """The whole database the site reads, committee votes included."""
+        day = datetime.fromtimestamp(votes_db.stat().st_mtime, UTC).date()
+        return FileResponse(
+            votes_db,
+            media_type="application/vnd.sqlite3",
+            filename=f"colombia-vote-audit-{day}.db",
+        )
+
     async def error(request: Request, exc: HTTPException):
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
@@ -422,6 +434,7 @@ def create_app(votes_db: Path, pdfs: Path | None = None, static: Path | None = N
         Route("/api/legislators", legislators),
         Route("/api/legislators/{id:int}", legislator),
         Route("/pdf/{id:int}", pdf),
+        Route("/download-db", download_db),
     ]
     if static:
         routes.append(Mount("/", StaticFiles(directory=static, html=True)))

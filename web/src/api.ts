@@ -72,6 +72,7 @@ export interface Stats {
   votes: number;
   records: number;
   legislators: number;
+  database_bytes: number;
 }
 
 async function get<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
