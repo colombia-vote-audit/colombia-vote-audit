@@ -84,6 +84,15 @@ export interface Comment {
   body: string;
   created_at: string; // UTC, ISO 8601
   previews: LinkPreview[];
+  files: Attachment[];
+}
+
+// A file attached to a comment. Images and PDFs open in the browser; the rest download.
+export interface Attachment {
+  name: string;
+  url: string;
+  content_type: string;
+  size: number;
 }
 
 export interface Stats {
@@ -166,8 +175,14 @@ export const api = {
   legislators: (q?: string) => get<{ total: number; legislators: LegislatorSummary[] }>("/api/legislators", { q }),
   legislator: (id: number) => get<LegislatorDetail>(`/api/legislators/${id}`),
   comments: (id: number) => get<{ comments: Comment[] }>(`/api/legislators/${id}/comments`),
-  postComment: (id: number, body: { organization: string; author: string; body: string }) =>
-    post<Comment>(`/api/legislators/${id}/comments`, body),
+  postComment: async (id: number, fields: { organization: string; author: string; body: string }, files: File[]) => {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) form.set(k, v);
+    for (const f of files) form.append("files", f);
+    const res = await fetch(`/api/legislators/${id}/comments`, { method: "POST", body: form });
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? res.statusText);
+    return (await res.json()) as Comment;
+  },
   barcode: () => get<BarcodeData>("/api/barcode"),
   ask: (body: { turns: Turn[]; view: unknown; lang: string }) => post<AskReply>("/api/ask", body),
 };

@@ -1,15 +1,22 @@
 """Comments on legislators' pages: notes and links posted by organizations.
 
 Anyone can post; each comment names the organization or group it's from.
-Comments live in the votes database itself, in two tables this module adds
+Comments live in the votes database itself, in three tables this module adds
 (so replacing the database loses them):
 
     comments        one row per comment, tied to legislators.id
     link_previews   title, description, site and image of each linked page,
                     fetched once when a comment first links it
+    comment_files   files attached to a comment
 
 A comment's links are the URLs in its text; the first MAX_LINKS get previews.
 Preview images are the page's og:image, linked, not copied.
+
+Attached files are kept outside the database, in a BlobStore under their
+sha256. Only images and PDFs, recognized by their first bytes rather than
+what the uploader claims, are shown in the browser (INLINE); anything else
+is served as a download, so an uploaded page or script never runs as part
+of the site.
 """
 
 from __future__ import annotations
@@ -18,9 +25,10 @@ import asyncio
 import ipaddress
 import re
 import sqlite3
+import unicodedata
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
@@ -42,6 +50,16 @@ CREATE TABLE IF NOT EXISTS link_previews (
     image TEXT,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS comment_files (
+    comment_id INTEGER NOT NULL REFERENCES comments(id),
+    position INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    name TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (comment_id, position)
+);
+CREATE INDEX IF NOT EXISTS comment_files_sha256 ON comment_files (sha256);
 """
 
 MAX_BODY = 4000
@@ -49,6 +67,19 @@ MAX_NAME = 120
 MAX_LINKS = 3
 MAX_PAGE_BYTES = 2 * 1024 * 1024  # YouTube puts its og: tags 700 KB in
 TIMEOUT = 6
+MAX_FILES = 5
+MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 90 * 1024 * 1024  # Cloudflare refuses request bodies over 100 MB
+
+# Types shown in the browser, by their first bytes.
+INLINE = {
+    b"\x89PNG\r\n\x1a\n": "image/png",
+    b"\xff\xd8\xff": "image/jpeg",
+    b"GIF87a": "image/gif",
+    b"GIF89a": "image/gif",
+    b"%PDF-": "application/pdf",
+}
+INLINE_TYPES = {*INLINE.values(), "image/webp"}
 
 URL = re.compile(r"https?://[^\s<>\"']+")
 
@@ -73,6 +104,43 @@ def links(body: str) -> list[str]:
         if url not in out:
             out.append(url)
     return out
+
+
+def sniff(data: bytes) -> str | None:
+    """The type of an image or PDF the browser may show, else None."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return next((kind for magic, kind in INLINE.items() if data.startswith(magic)), None)
+
+
+def file_name(name: str | None) -> str:
+    """The uploader's filename without any path, control characters or excess length."""
+    name = re.split(r"[/\\]", name or "")[-1]
+    name = "".join(c for c in name if unicodedata.category(c)[0] != "C").strip(" .")
+    if len(name) > 150:
+        stem, dot, ext = name.rpartition(".")
+        name = f"{stem[: 140 - len(ext)]}.{ext}" if dot and len(ext) <= 10 else name[:150]
+    return name or "file"
+
+
+def attach(conn: sqlite3.Connection, comment_id: int, files, shas: list[str]) -> None:
+    """Ties (name, declared type, bytes) files, already in the store under
+    `shas`, to a comment."""
+    rows = []
+    for position, ((name, declared, data), sha) in enumerate(zip(files, shas, strict=True)):
+        # A claimed image or PDF that isn't one is stored as neither.
+        kind = sniff(data) or (declared or "").split(";")[0].strip().lower()
+        if kind in INLINE_TYPES and kind != sniff(data):
+            kind = ""
+        rows.append(
+            (comment_id, position, sha, file_name(name),
+             kind or "application/octet-stream", len(data))
+        )  # fmt: skip
+    conn.executemany("INSERT INTO comment_files VALUES (?, ?, ?, ?, ?, ?)", rows)
+
+
+def file_url(sha256: str, name: str) -> str:
+    return f"/files/{sha256}/{quote(name)}"
 
 
 def now() -> str:
@@ -218,6 +286,16 @@ def listing(conn: sqlite3.Connection, legislator_id: int) -> list[dict]:
                     "site_name": site,
                     "image": image,
                 }
+    files = {}
+    for cid, sha, name, kind, size in conn.execute(
+        "SELECT f.comment_id, f.sha256, f.name, f.content_type, f.size FROM comment_files f"
+        " JOIN comments c ON c.id = f.comment_id WHERE c.legislator_id = ?"
+        " ORDER BY f.comment_id, f.position",
+        (legislator_id,),
+    ):
+        files.setdefault(cid, []).append(
+            {"name": name, "url": file_url(sha, name), "content_type": kind, "size": size}
+        )
     return [
         {
             "id": cid,
@@ -226,6 +304,7 @@ def listing(conn: sqlite3.Connection, legislator_id: int) -> list[dict]:
             "body": body,
             "created_at": created,
             "previews": [previews[u] for u in links(body)[:MAX_LINKS] if u in previews],
+            "files": files.get(cid, []),
         }
         for cid, org, author, body, created in rows
     ]

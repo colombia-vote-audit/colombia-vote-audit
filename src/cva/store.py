@@ -1,4 +1,5 @@
-"""Content-addressed PDF storage on local disk."""
+"""Content-addressed file storage on local disk: gazette PDFs, and files
+attached to comments."""
 
 from __future__ import annotations
 
@@ -9,12 +10,13 @@ from pathlib import Path
 
 
 class BlobStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, suffix: str = ".pdf"):
         self.root = root
+        self.suffix = suffix
         root.mkdir(parents=True, exist_ok=True)
 
     def path_for(self, sha256: str) -> Path:
-        return self.root / sha256[:2] / f"{sha256}.pdf"
+        return self.root / sha256[:2] / f"{sha256}{self.suffix}"
 
     def put(self, data: bytes) -> str:
         """Store `data` and return its sha256.

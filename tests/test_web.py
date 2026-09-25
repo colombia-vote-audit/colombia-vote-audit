@@ -329,3 +329,50 @@ def test_bad_comments_are_refused(client):
     ] * 5
     assert client.post("/api/legislators/99/comments", json=bad[0]).status_code == 404
     assert client.get("/api/legislators/99/comments").status_code == 404
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+
+
+def test_files_are_attached_and_only_images_and_pdfs_shown_inline(votes_db, tmp_path):
+    uploads = tmp_path / "uploads"
+    client = TestClient(web.create_app(votes_db, uploads=uploads))
+    r = client.post(
+        "/api/legislators/1/comments",
+        data={"organization": "Grupo", "author": "", "body": ""},
+        files=[
+            ("files", ("foto.png", PNG, "image/png")),
+            ("files", ("../../datos.csv", b"a,b\n1,2\n", "text/csv")),
+            ("files", ("page.html", b"<script>alert(1)</script>", "image/png")),
+        ],
+    )
+    assert r.status_code == 201
+    files = r.json()["files"]
+    assert [(f["name"], f["content_type"], f["size"]) for f in files] == [
+        ("foto.png", "image/png", len(PNG)),
+        ("datos.csv", "text/csv", 8),
+        ("page.html", "application/octet-stream", 25),
+    ]
+    assert client.get("/api/legislators/1/comments").json()["comments"][0]["files"] == files
+    image = client.get(files[0]["url"])
+    assert image.content == PNG and image.headers["content-type"] == "image/png"
+    assert image.headers["content-disposition"].startswith("inline")
+    assert "immutable" in image.headers["cache-control"]
+    for f in files[1:]:
+        got = client.get(f["url"])
+        assert got.headers["content-disposition"].startswith("attachment")
+        assert got.headers["content-type"] == "application/octet-stream"
+        assert got.headers["x-content-type-options"] == "nosniff"
+    assert client.get(f"/files/{'0' * 64}/x.png").status_code == 404
+    assert len(list(uploads.rglob("*"))) == 6  # three files in three hash directories
+
+
+def test_too_many_or_too_big_files_are_refused(votes_db, tmp_path, monkeypatch):
+    client = TestClient(web.create_app(votes_db, uploads=tmp_path / "uploads"))
+    fields = {"organization": "Grupo", "body": "hola"}
+    six = [("files", (f"{i}.txt", b"x", "text/plain")) for i in range(6)]
+    assert client.post("/api/legislators/1/comments", data=fields, files=six).status_code == 400
+    monkeypatch.setattr(web.commenting, "MAX_FILE_BYTES", 10)
+    big = [("files", ("big.bin", b"x" * 11, "application/octet-stream"))]
+    assert client.post("/api/legislators/1/comments", data=fields, files=big).status_code == 413
+    assert client.get("/api/legislators/1/comments").json() == {"comments": []}

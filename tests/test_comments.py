@@ -41,3 +41,17 @@ def test_previews_are_not_fetched_from_this_machine(url):
     request = httpx.Request("GET", url)
     with pytest.raises(httpx.ConnectError, match="public"):
         asyncio.run(comments.public_only(request))
+
+
+def test_file_names_lose_paths_and_control_characters():
+    assert comments.file_name("C:\\Users\\ana\\informe.pdf") == "informe.pdf"
+    assert comments.file_name("../../etc/pas\x00swd") == "passwd"
+    assert comments.file_name("") == "file"
+    long = comments.file_name("a" * 300 + ".pdf")
+    assert len(long) == 141 and long.endswith(".pdf")
+
+
+def test_sniff_recognizes_images_and_pdfs_by_their_bytes():
+    assert comments.sniff(b"%PDF-1.7\n") == "application/pdf"
+    assert comments.sniff(b"RIFF\0\0\0\0WEBPVP8 ") == "image/webp"
+    assert comments.sniff(b"<svg xmlns=...>") is None

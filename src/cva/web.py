@@ -24,8 +24,10 @@ Endpoints:
     GET /api/legislators?q=
     GET /api/legislators/{id}
     GET /api/legislators/{id}/comments      notes and links posted about them (cva.comments)
-    POST /api/legislators/{id}/comments     {organization, author, body}: post one
+    POST /api/legislators/{id}/comments     {organization, author, body}: post one, as
+                                            JSON or as form data with up to 5 files
     GET /pdf/{document id}      the gazette PDF, when --pdfs is given
+    GET /files/{sha256}/{name}  a file attached to a comment
     GET /download-db            the votes database itself, gzipped, for anyone to use
     GET /api/barcode            every House member's ballot on every checked roll call
                                 (cva.barcode), and whether the question box is on
@@ -215,6 +217,8 @@ class Data:
 def cache_policy(path: str) -> str:
     if path.startswith("/assets/"):
         return "public, max-age=31536000, immutable"
+    if path.startswith("/files/"):
+        return "public, max-age=31536000, immutable"
     if path.startswith("/pdf/"):
         return "public, max-age=86400"
     if path.startswith("/api/") and path.endswith("/comments"):
@@ -290,11 +294,14 @@ def create_app(
     static: Path | None = None,
     llm: asking.Complete | None = None,
     preview=commenting.fetch_preview,
+    uploads: Path | None = None,
 ):
     """`llm` answers the question box; without it the box is off. `preview`
-    fetches a link's preview for comments."""
+    fetches a link's preview for comments. Files attached to comments are kept
+    in `uploads`, by default an uploads directory beside the database."""
     data = Data(votes_db)
     commenting.setup(votes_db)
+    uploads = BlobStore(uploads or votes_db.with_name("uploads"), suffix="")
     barcode_json = json.dumps(
         {**data.grid.payload(), "ask": llm is not None}, ensure_ascii=False, separators=(",", ":")
     ).encode()
@@ -480,19 +487,37 @@ def create_app(
         lid = request.path_params["id"]
         if lid not in data.legislators:
             raise HTTPException(404, "no such legislator")
+        if int(request.headers.get("content-length") or 0) > commenting.MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "attach at most 90 MB per comment")
+        files = []
         try:
-            got = await request.json()
+            if request.headers.get("content-type", "").startswith("multipart/form-data"):
+                # Files come as multipart form data, with the fields beside them.
+                async with request.form(max_files=commenting.MAX_FILES, max_fields=10) as got:
+                    for f in got.getlist("files"):
+                        if isinstance(f, str) or not f.filename:
+                            continue
+                        content = await f.read(commenting.MAX_FILE_BYTES + 1)
+                        if len(content) > commenting.MAX_FILE_BYTES:
+                            raise HTTPException(413, f"{f.filename} is over 25 MB")
+                        files.append((f.filename, f.content_type, content))
+                    got = dict(got)
+            else:
+                got = await request.json()
             org = " ".join(str(got["organization"]).split())
             author = " ".join(str(got.get("author") or "").split()) or None
-            body = str(got["body"]).strip()
+            body = str(got.get("body") or "").strip()
         except (ValueError, KeyError, TypeError, AttributeError):
-            raise HTTPException(400, "send {organization, author, body}") from None
-        if not org or not body:
-            raise HTTPException(400, "a comment needs an organization and some text")
+            raise HTTPException(400, "send {organization, author, body} and files") from None
+        if not org or not (body or files):
+            raise HTTPException(400, "a comment needs an organization and some text or a file")
+        if sum(len(f[2]) for f in files) > commenting.MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "attach at most 90 MB per comment")
         if len(org) > commenting.MAX_NAME or len(author or "") > commenting.MAX_NAME:
             raise HTTPException(400, f"keep names under {commenting.MAX_NAME} characters")
         if len(body) > commenting.MAX_BODY:
             raise HTTPException(400, f"keep comments under {commenting.MAX_BODY} characters")
+        shas = await run_in_threadpool(lambda: [uploads.put(f[2]) for f in files])
         conn = sqlite3.connect(votes_db, timeout=15)
         try:
             urls = commenting.links(body)[: commenting.MAX_LINKS]
@@ -503,11 +528,34 @@ def create_app(
                 " VALUES (?, ?, ?, ?, ?)",
                 (lid, org, author, body, commenting.now()),
             ).lastrowid
+            commenting.attach(conn, cid, files, shas)
             conn.commit()
             posted = next(c for c in commenting.listing(conn, lid) if c["id"] == cid)
         finally:
             conn.close()
         return JSONResponse(posted, status_code=201)
+
+    def attachment(request: Request):
+        sha = request.path_params["sha"]
+        conn = data.connect()
+        try:
+            row = conn.execute(
+                "SELECT name, content_type FROM comment_files WHERE sha256 = ? LIMIT 1", (sha,)
+            ).fetchone()
+        finally:
+            conn.close()
+        path = uploads.path_for(sha)
+        if not row or not path.is_file():
+            raise HTTPException(404, "no such file")
+        name, kind = row
+        inline = kind in commenting.INLINE_TYPES
+        return FileResponse(
+            path,
+            media_type=kind if inline else "application/octet-stream",
+            filename=request.path_params["name"] or name,
+            content_disposition_type="inline" if inline else "attachment",
+            headers={"x-content-type-options": "nosniff"},
+        )
 
     def pdf(request: Request):
         doc = request.path_params["id"]
@@ -580,6 +628,7 @@ def create_app(
         Route("/api/legislators/{id:int}/comments", comments),
         Route("/api/legislators/{id:int}/comments", post_comment, methods=["POST"]),
         Route("/pdf/{id:int}", pdf),
+        Route("/files/{sha:str}/{name:str}", attachment),
         Route("/download-db", download_db),
         Route("/api/barcode", barcode),
         Route("/api/ask", ask, methods=["POST"]),
@@ -600,6 +649,11 @@ def main(argv: list[str] | None = None):
     ap.add_argument("votes_db", type=Path, help="votes database, after cva.attendance")
     ap.add_argument("--pdfs", type=Path, help="PDF store of the pipeline, e.g. data/pdfs")
     ap.add_argument("--static", type=Path, help="built frontend to serve at /, e.g. web/dist")
+    ap.add_argument(
+        "--uploads",
+        type=Path,
+        help="where files attached to comments are kept (default: beside votes_db)",
+    )
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args(argv)
@@ -607,7 +661,9 @@ def main(argv: list[str] | None = None):
     if llm is None:
         print("question box off: set CVA_LLM_BASE_URL, CVA_LLM_API_KEY and CVA_LLM_MODEL")
     uvicorn.run(
-        create_app(args.votes_db, args.pdfs, args.static, llm), host=args.host, port=args.port
+        create_app(args.votes_db, args.pdfs, args.static, llm, uploads=args.uploads),
+        host=args.host,
+        port=args.port,
     )
 
 

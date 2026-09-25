@@ -1,9 +1,13 @@
-import { useState, type FormEvent, type ReactNode } from "react";
-import { api, type Comment, type LinkPreview } from "../api";
+import { useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { api, type Attachment, type Comment, type LinkPreview } from "../api";
 import { Status, useFetch } from "../common";
 import { useI18n } from "../i18n";
 
-const MAX_BODY = 4000; // cva.comments.MAX_BODY
+// Limits from cva.comments.
+const MAX_BODY = 4000;
+const MAX_FILES = 5;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 90 * 1024 * 1024;
 const LINK = /https?:\/\/[^\s<>"']+/g;
 
 const count = (s: string, c: string) => s.split(c).length - 1;
@@ -56,6 +60,40 @@ function Preview({ p }: { p: LinkPreview }) {
   );
 }
 
+function size(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function Files({ files }: { files: Attachment[] }) {
+  const images = files.filter((f) => f.content_type.startsWith("image/"));
+  const others = files.filter((f) => !f.content_type.startsWith("image/"));
+  return (
+    <>
+      {images.length > 0 && (
+        <div className="attached-images">
+          {images.map((f) => (
+            <a key={f.url} href={f.url} target="_blank" rel="noopener" title={f.name}>
+              <img src={f.url} alt={f.name} loading="lazy" />
+            </a>
+          ))}
+        </div>
+      )}
+      {others.length > 0 && (
+        <ul className="attached-files">
+          {others.map((f) => (
+            <li key={f.url}>
+              <a href={f.url} target="_blank" rel="noopener">
+                {f.name}
+              </a>
+              <small className="mono muted">{size(f.size)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
 function Post({ c }: { c: Comment }) {
   const { t, dateTime } = useI18n();
   return (
@@ -67,7 +105,8 @@ function Post({ c }: { c: Comment }) {
           {dateTime(c.created_at)}
         </time>
       </p>
-      <Linked text={c.body} />
+      {c.body && <Linked text={c.body} />}
+      <Files files={c.files} />
       {c.previews.map((p) => (
         <Preview key={p.url} p={p} />
       ))}
@@ -80,19 +119,43 @@ function Form({ legislatorId, onPosted }: { legislatorId: number; onPosted: () =
   const [organization, setOrganization] = useState(() => localStorage.getItem("commentOrg") ?? "");
   const [author, setAuthor] = useState(() => localStorage.getItem("commentAuthor") ?? "");
   const [body, setBody] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const picker = useRef<HTMLInputElement>(null);
   const over = body.trim().length - MAX_BODY;
+  const big = files.find((f) => f.size > MAX_FILE_BYTES);
+  const fileProblem =
+    files.length > MAX_FILES
+      ? t.comments.tooMany
+      : big
+        ? t.comments.tooBig(big.name)
+        : files.reduce((n, f) => n + f.size, 0) > MAX_UPLOAD_BYTES
+          ? t.comments.tooBigTotal
+          : null;
+
+  // Copied out at once: the FileList empties when the input is cleared.
+  const add = (list: FileList | null) => {
+    const picked = Array.from(list ?? []);
+    setFiles((have) => [...have, ...picked]);
+  };
+  const drop = (e: DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    add(e.dataTransfer.files);
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await api.postComment(legislatorId, { organization, author, body });
+      await api.postComment(legislatorId, { organization, author, body }, files);
       localStorage.setItem("commentOrg", organization.trim());
       localStorage.setItem("commentAuthor", author.trim());
       setBody("");
+      setFiles([]);
       onPosted();
     } catch (err) {
       setError((err as Error).message);
@@ -102,7 +165,19 @@ function Form({ legislatorId, onPosted }: { legislatorId: number; onPosted: () =
   };
 
   return (
-    <form className="comment-form" onSubmit={submit}>
+    <form
+      className={`comment-form${dragging ? " dragging" : ""}`}
+      onSubmit={submit}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+      }}
+      onDrop={drop}
+    >
       <div className="comment-names">
         <label>
           {t.comments.organization}
@@ -122,17 +197,49 @@ function Form({ legislatorId, onPosted }: { legislatorId: number; onPosted: () =
       <label>
         {t.comments.body}
         <textarea
-          required
           rows={4}
           value={body}
           placeholder={t.comments.bodyPlaceholder}
           onChange={(e) => setBody(e.target.value)}
         />
       </label>
+      <div className="attach">
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            add(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button type="button" className="chip dashed" onClick={() => picker.current?.click()}>
+          + {t.comments.attach}
+        </button>
+        <small className="muted">{t.comments.attachNote}</small>
+        {files.map((f, i) => (
+          <span className="chip" key={`${i}-${f.name}`}>
+            {f.name} <small className="mono muted">{size(f.size)}</small>
+            <button
+              type="button"
+              className="x"
+              aria-label={`${t.comments.remove} ${f.name}`}
+              onClick={() => setFiles(files.filter((_, j) => j !== i))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
       <div className="comment-actions">
         {over > 0 && <span className="error">{t.comments.tooLong(over)}</span>}
+        {fileProblem && <span className="error">{fileProblem}</span>}
         {error && <span className="error">{t.comments.failed(error)}</span>}
-        <button type="submit" disabled={busy || over > 0 || !organization.trim() || !body.trim()}>
+        <button
+          type="submit"
+          disabled={busy || over > 0 || !!fileProblem || !organization.trim() || !(body.trim() || files.length)}
+        >
           {busy ? t.comments.posting : t.comments.post}
         </button>
       </div>

@@ -9,6 +9,7 @@ export default defineConfig({
       "/api": "http://127.0.0.1:8000",
       "/pdf": "http://127.0.0.1:8000",
       "/download-db": "http://127.0.0.1:8000",
+      "/files": "http://127.0.0.1:8000",
     },
   },
 });
