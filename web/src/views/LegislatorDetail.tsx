@@ -48,6 +48,8 @@ function Body({ p }: { p: Legislator }) {
     [t.position.abstain, p.totals.abstain, "abstain"],
     [t.position.absent, p.totals.absent, "absent"],
   ];
+  // The records have only Sí and No, so the tile is shown only when the text names some.
+  const tiles = stats.filter(([, n, kind]) => kind !== "abstain" || n > 0);
   return (
     <>
       <header className="profile">
@@ -75,7 +77,7 @@ function Body({ p }: { p: Legislator }) {
       </header>
 
       <div className="stats">
-        {stats.map(([label, n, kind]) => {
+        {tiles.map(([label, n, kind]) => {
           const position = kind === "cast" ? null : kind;
           return (
             <button

@@ -61,6 +61,8 @@ const en = {
   checkFailedBadge: "Check failed",
   fromText: "Names read from the gazette text. They weren't checked against a voting record.",
   noneRecorded: "None recorded",
+  noAbstain:
+    "The voting records have only Yes and No: members can't abstain, only be excused over a conflict of interest (an impedimento).",
   absentUnknown:
     "Who didn't vote is known only for checked plenary votes read from scanned voting records.",
   inOffice: (a: string, b: string) => `In office per recorded votes ${a} → ${b}`,
@@ -132,6 +134,8 @@ const es: Dict = {
   checkFailedBadge: "No verificado",
   fromText: "Nombres leídos del texto de la gaceta. No se verificaron contra un registro de votación.",
   noneRecorded: "Ninguno registrado",
+  noAbstain:
+    "Los registros de votación solo tienen Sí y No: los congresistas no pueden abstenerse, solo ser excusados por conflicto de interés (un impedimento).",
   absentUnknown:
     "Quién no votó solo se sabe para votaciones de plenaria verificadas, leídas de registros de votación escaneados.",
   inOffice: (a, b) => `En el cargo según votos registrados ${a} → ${b}`,

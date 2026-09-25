@@ -20,7 +20,8 @@ export function VoteDetail({ id, back }: { id: number; back: Back }) {
 
 function Body({ v }: { v: Vote }) {
   const { t, longDate } = useI18n();
-  const shown = POSITIONS.filter((p) => p !== "absent" || v.groups.absent);
+  // The records have only Sí and No, so abstentions are shown only when the text names some.
+  const shown = POSITIONS.filter((p) => (p !== "absent" || v.groups.absent) && (p !== "abstain" || v.counts.abstain));
   const count = (p: Position) => v.counts[p] ?? 0;
   const all = shown.reduce((n, p) => n + count(p), 0) || 1;
   const flagged = v.date_source === "gazette" || v.date_source === "publication";
@@ -64,7 +65,9 @@ function Body({ v }: { v: Vote }) {
           <Column key={p} position={p} people={v.groups[p] ?? []} />
         ))}
       </div>
-      {!v.groups.absent && <p className="note">{t.absentUnknown}</p>}
+      <p className="note">
+        {!v.counts.abstain && t.noAbstain} {!v.groups.absent && t.absentUnknown}
+      </p>
     </>
   );
 }
